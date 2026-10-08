@@ -428,13 +428,14 @@ client.on('interactionCreate', async (interaction) => {
           parent: catAdmin.id
         });
 
-        // Donner le rôle Coach au créateur
+        // Donner le rôle Coach & Membre Vérifié au PROPRIÉTAIRE (Owner) du serveur
         try {
-          const member = await guild.members.fetch(interaction.user.id);
-          await member.roles.add(coachRole);
-          await member.roles.add(membreRole);
+          const owner = await guild.fetchOwner();
+          if (coachRole) await owner.roles.add(coachRole);
+          if (membreRole) await owner.roles.add(membreRole);
+          console.log(`👑 Rôle Coach attribué au Propriétaire du serveur : ${owner.user.tag}`);
         } catch (e) {
-          console.log('Erreur attribution rôle coach:', e);
+          console.log('Erreur attribution rôle coach au propriétaire:', e);
         }
 
         await interaction.editReply('📝 **3/4 - Publication des panneaux interactifs...**');
