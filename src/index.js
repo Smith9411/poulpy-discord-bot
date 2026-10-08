@@ -40,22 +40,61 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences
+    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.GuildVoiceStates
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.GuildMember]
 });
+
+// Map pour suivre les salons vocaux temporaires créés
+const tempVoiceChannels = new Set();
 
 // 3. Définition des Slash Commands
 const commands = [
   new SlashCommandBuilder()
     .setName('setup-server')
-    .setDescription('⚡ Crée automatiquement toute la structure du serveur Poulpy Coaching (Admin uniquement)')
+    .setDescription('⚡ Construit TOUT le serveur Poulpy Coaching (Rôles, Salons, Règles, Tickets, Vocaux)')
     .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator),
 
   new SlashCommandBuilder()
+    .setName('rules')
+    .setDescription('📜 Affiche le règlement officiel et le bouton de vérification')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('ticket-panel')
+    .setDescription('🎫 Affiche le panneau pour ouvrir un ticket support')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+
+  new SlashCommandBuilder()
     .setName('roles')
-    .setDescription('🎯 Affiche le panneau interactif pour choisir ses rôles (Apex & Valorant)')
+    .setDescription('🎯 Affiche le panneau pour choisir ses jeux (Apex & Valorant)')
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageRoles),
+
+  new SlashCommandBuilder()
+    .setName('annonce')
+    .setDescription('📢 Publier une annonce officielle Poulpy Coaching')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
+    .addStringOption(opt =>
+      opt.setName('titre')
+        .setDescription('Titre de l\'annonce')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('message')
+        .setDescription('Texte complet de l\'annonce')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('mention')
+        .setDescription('Mentionner le serveur ?')
+        .setRequired(false)
+        .addChoices(
+          { name: '@everyone (Tout le serveur)', value: 'everyone' },
+          { name: '@here (Membres connectés)', value: 'here' },
+          { name: 'Aucune mention', value: 'none' }
+        )
+    ),
 
   new SlashCommandBuilder()
     .setName('coaching')
@@ -162,7 +201,6 @@ async function broadcastBookingAlert(booking) {
       .setStyle(ButtonStyle.Link)
   );
 
-  // Parcourir tous les serveurs où se trouve le bot pour trouver le salon d'alerte
   for (const guild of client.guilds.cache.values()) {
     const alertChannel = guild.channels.cache.find(
       c => c.name.includes('alertes-réservations') || c.name.includes('reservations') || c.name.includes('coach-admin')
@@ -189,13 +227,13 @@ client.on('interactionCreate', async (interaction) => {
       const guild = interaction.guild;
 
       try {
-        await interaction.editReply('🏗️ **Création des rôles en cours...**');
+        await interaction.editReply('🏗️ **1/4 - Création des rôles...**');
 
-        // Création des Rôles (Apex & Valo uniquement)
+        // Création des Rôles
         const rolesToCreate = [
           { name: '👑・Coach Poulpy', color: 0x06b6d4, hoist: true, mentionable: true },
           { name: '🎓・Élève Poulpy', color: 0x3b82f6, hoist: true, mentionable: true },
-          { name: '⭐・VIP / Follower', color: 0xeab308, hoist: true, mentionable: false },
+          { name: '⭐・Membre Vérifié', color: 0x10b981, hoist: true, mentionable: false },
           { name: '🔴・Apex Legends', color: 0xef4444, hoist: false, mentionable: true },
           { name: '🟣・Valorant', color: 0xa855f7, hoist: false, mentionable: true },
         ];
@@ -217,21 +255,22 @@ client.on('interactionCreate', async (interaction) => {
 
         const coachRole = createdRoles['👑・Coach Poulpy'];
         const eleveRole = createdRoles['🎓・Élève Poulpy'];
+        const membreRole = createdRoles['⭐・Membre Vérifié'];
 
-        await interaction.editReply('📁 **Création des catégories et salons...**');
+        await interaction.editReply('📁 **2/4 - Création des catégories et salons...**');
 
-        // Catégorie 1 : ACCUEIL & INFOS
+        // Catégorie 1 : ACCUEIL & INFOS (Seul salon visible avant vérification)
         const catInfos = await guild.channels.create({
           name: '📌・ACCUEIL & INFOS',
           type: ChannelType.GuildCategory
         });
-        await guild.channels.create({
-          name: '📢・annonces',
+        const chanRegles = await guild.channels.create({
+          name: '📜・règlement-et-accès',
           type: ChannelType.GuildText,
           parent: catInfos.id
         });
-        await guild.channels.create({
-          name: '📜・règlement',
+        const chanAnnonces = await guild.channels.create({
+          name: '📢・annonces',
           type: ChannelType.GuildText,
           parent: catInfos.id
         });
@@ -245,18 +284,59 @@ client.on('interactionCreate', async (interaction) => {
           type: ChannelType.GuildText,
           parent: catInfos.id
         });
+        const chanContact = await guild.channels.create({
+          name: '📩・contacter-poulpy',
+          type: ChannelType.GuildText,
+          parent: catInfos.id
+        });
 
-        // Catégorie 2 : ESPORT & COMMUNAUTÉ (Apex & Valo uniquement)
+        // Catégorie 2 : ESPORT & COMMUNAUTÉ (Visible par Membre Vérifié)
         const catEsport = await guild.channels.create({
           name: '🎮・ESPORT & COMMUNAUTÉ',
-          type: ChannelType.GuildCategory
+          type: ChannelType.GuildCategory,
+          permissionOverwrites: [
+            {
+              id: guild.roles.everyone.id,
+              deny: [PermissionsBitField.Flags.ViewChannel]
+            },
+            {
+              id: membreRole.id,
+              allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages]
+            }
+          ]
         });
         await guild.channels.create({ name: '💬・général', type: ChannelType.GuildText, parent: catEsport.id });
         await guild.channels.create({ name: '🔥・clips-et-highlights', type: ChannelType.GuildText, parent: catEsport.id });
         await guild.channels.create({ name: '🔴・apex-legends', type: ChannelType.GuildText, parent: catEsport.id });
         await guild.channels.create({ name: '🟣・valorant', type: ChannelType.GuildText, parent: catEsport.id });
 
-        // Catégorie 3 : ZONE COACHING (Élèves & Coach)
+        // Catégorie 3 : SALONS VOCAUX & DUO DYNAMIQUE
+        const catVocaux = await guild.channels.create({
+          name: '🎙️・SALONS VOCAUX',
+          type: ChannelType.GuildCategory,
+          permissionOverwrites: [
+            {
+              id: guild.roles.everyone.id,
+              deny: [PermissionsBitField.Flags.ViewChannel]
+            },
+            {
+              id: membreRole.id,
+              allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Connect, PermissionsBitField.Flags.Speak]
+            }
+          ]
+        });
+        await guild.channels.create({
+          name: '➕ Créer un Salon Vocal',
+          type: ChannelType.GuildVoice,
+          parent: catVocaux.id
+        });
+        await guild.channels.create({
+          name: '🔊 Chill & Aim Training',
+          type: ChannelType.GuildVoice,
+          parent: catVocaux.id
+        });
+
+        // Catégorie 4 : ZONE COACHING (Élèves & Coach)
         const catCoaching = await guild.channels.create({
           name: '🔒・ESPACE COACHING',
           type: ChannelType.GuildCategory,
@@ -296,7 +376,7 @@ client.on('interactionCreate', async (interaction) => {
           parent: catCoaching.id
         });
 
-        // Catégorie 4 : ADMIN COACH (Totalement secret)
+        // Catégorie 5 : ADMIN COACH (Totalement secret)
         const catAdmin = await guild.channels.create({
           name: '⚙️・ADMIN POULPY',
           type: ChannelType.GuildCategory,
@@ -321,14 +401,23 @@ client.on('interactionCreate', async (interaction) => {
         try {
           const member = await guild.members.fetch(interaction.user.id);
           await member.roles.add(coachRole);
+          await member.roles.add(membreRole);
         } catch (e) {
           console.log('Erreur attribution rôle coach:', e);
         }
 
-        // Poster le message des rôles
+        await interaction.editReply('📝 **3/4 - Publication des panneaux interactifs...**');
+
+        // 1. Poster le Règlement interactif
+        await postRulesPanel(chanRegles);
+
+        // 2. Poster le Panneau de Ticket
+        await postTicketPanel(chanContact);
+
+        // 3. Poster le Sélecteur de Rôles
         await postRoleSelector(chanRoles);
 
-        // Poster le message des liens utiles épuré
+        // 4. Poster les Liens Utiles
         const embedLiens = new EmbedBuilder()
           .setTitle('🔗 LIENS OFFICIELS POULPY COACHING')
           .setColor(0x06b6d4)
@@ -352,23 +441,58 @@ client.on('interactionCreate', async (interaction) => {
             .setURL(SITE_URL)
             .setStyle(ButtonStyle.Link)
         );
-
         await chanLiens.send({ embeds: [embedLiens], components: [rowLiens] });
 
-        await interaction.editReply('✅ **Serveur Poulpy Coaching entièrement configuré avec succès !** Tous les salons, rôles (Apex & Valorant) et permissions sont prêts.');
+        await interaction.editReply('✅ **Serveur Poulpy Coaching 100 % configuré avec succès !**\n- Règlement interactif & Anti-raid en place\n- Système de Tickets privé prêt\n- Salons vocaux temporaires automatiques activés\n- Alertes réservations connectées');
       } catch (err) {
         console.error('Erreur setup-server :', err);
         await interaction.editReply(`❌ Erreur lors du setup : \`${err.message}\``);
       }
     }
 
-    // 2. COMMANDE /ROLES
+    // 2. COMMANDE /RULES
+    if (commandName === 'rules') {
+      await postRulesPanel(interaction.channel);
+      await interaction.reply({ content: '✅ Panneau de règlement envoyé !', ephemeral: true });
+    }
+
+    // 3. COMMANDE /TICKET-PANEL
+    if (commandName === 'ticket-panel') {
+      await postTicketPanel(interaction.channel);
+      await interaction.reply({ content: '✅ Panneau de ticket envoyé !', ephemeral: true });
+    }
+
+    // 4. COMMANDE /ROLES
     if (commandName === 'roles') {
       await postRoleSelector(interaction.channel);
       await interaction.reply({ content: '✅ Panneau de rôles envoyé !', ephemeral: true });
     }
 
-    // 3. COMMANDE /COACHING
+    // 5. COMMANDE /ANNONCE
+    if (commandName === 'annonce') {
+      const titre = interaction.options.getString('titre');
+      const message = interaction.options.getString('message');
+      const mention = interaction.options.getString('mention') || 'none';
+
+      const embed = new EmbedBuilder()
+        .setTitle(`📢 ${titre}`)
+        .setColor(0x06b6d4)
+        .setDescription(message)
+        .setThumbnail(`${SITE_URL}/logo.png`)
+        .setFooter({ text: 'Poulpy Coaching • Annonce Officielle' })
+        .setTimestamp();
+
+      const targetChannel = interaction.guild.channels.cache.find(c => c.name.includes('annonces')) || interaction.channel;
+      
+      let mentionText = '';
+      if (mention === 'everyone') mentionText = '@everyone';
+      if (mention === 'here') mentionText = '@here';
+
+      await targetChannel.send({ content: mentionText || undefined, embeds: [embed] });
+      await interaction.reply({ content: `✅ Annonce publiée dans <#${targetChannel.id}> !`, ephemeral: true });
+    }
+
+    // 6. COMMANDE /COACHING
     if (commandName === 'coaching') {
       const embed = new EmbedBuilder()
         .setTitle('🐙 POULPY COACHING • DEVIENS LA MEILLEURE VERSION DE TOI-MÊME')
@@ -400,7 +524,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ embeds: [embed], components: [row] });
     }
 
-    // 4. COMMANDE /DISPOS
+    // 7. COMMANDE /DISPOS
     if (commandName === 'dispos') {
       const embed = new EmbedBuilder()
         .setTitle('📅 DISPONIBILITÉS & CRÉNEAUX EN DIRECT')
@@ -420,7 +544,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ embeds: [embed], components: [row] });
     }
 
-    // 5. COMMANDE /VOD
+    // 8. COMMANDE /VOD
     if (commandName === 'vod') {
       const lien = interaction.options.getString('lien');
       const jeu = interaction.options.getString('jeu');
@@ -439,22 +563,113 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.reply({ content: '✅ Ta VOD a bien été enregistrée et partagée avec Poulpy !', ephemeral: true });
 
-      // Envoi dans le salon partage-vod si présent
       const vodChannel = interaction.guild.channels.cache.find(c => c.name.includes('partage-vod') || c.name.includes('vod'));
       if (vodChannel) {
         await vodChannel.send({ embeds: [embed] });
       }
     }
 
-    // 6. COMMANDE /PING
+    // 9. COMMANDE /PING
     if (commandName === 'ping') {
       await interaction.reply({ content: `🏓 Pong ! Latence : \`${client.ws.ping}ms\``, ephemeral: true });
     }
   }
 
-  // --- B. GESTION DES BOUTONS DE RÔLES INTERACTIFS ---
+  // --- B. GESTION DES BOUTONS INTERACTIFS ---
   if (interaction.isButton()) {
-    const customId = interaction.customId;
+    const { customId, guild, member, user } = interaction;
+
+    // 1. BOUTON D'ACCEPTATION DU RÈGLEMENT (Vérification Anti-Raid)
+    if (customId === 'btn_accept_rules') {
+      const membreRole = guild.roles.cache.find(r => r.name === '⭐・Membre Vérifié');
+      if (!membreRole) {
+        return interaction.reply({ content: '❌ Rôle introuvable. Tapez `/setup-server` d\'abord.', ephemeral: true });
+      }
+      if (member.roles.cache.has(membreRole.id)) {
+        return interaction.reply({ content: '✅ Tu as déjà accepté le règlement et validé ton accès !', ephemeral: true });
+      }
+      await member.roles.add(membreRole);
+      return interaction.reply({
+        content: '🎉 **Bienvenue !** Tu as accepté le règlement. Tous les salons de la communauté te sont désormais ouverts !',
+        ephemeral: true
+      });
+    }
+
+    // 2. BOUTON CRÉATION DE TICKET
+    if (customId === 'btn_open_ticket') {
+      await interaction.deferReply({ ephemeral: true });
+
+      const existingChannel = guild.channels.cache.find(c => c.name === `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '')}`);
+      if (existingChannel) {
+        return interaction.editReply(`⚠️ Tu as déjà un ticket ouvert dans <#${existingChannel.id}> !`);
+      }
+
+      const coachRole = guild.roles.cache.find(r => r.name === '👑・Coach Poulpy');
+
+      let catTickets = guild.channels.cache.find(c => c.name === '🎫・TICKETS SUPPORT' && c.type === ChannelType.GuildCategory);
+      if (!catTickets) {
+        catTickets = await guild.channels.create({
+          name: '🎫・TICKETS SUPPORT',
+          type: ChannelType.GuildCategory
+        });
+      }
+
+      const ticketChannel = await guild.channels.create({
+        name: `ticket-${user.username}`,
+        type: ChannelType.GuildText,
+        parent: catTickets.id,
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone.id,
+            deny: [PermissionsBitField.Flags.ViewChannel]
+          },
+          {
+            id: user.id,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.AttachFiles]
+          },
+          ...(coachRole ? [{
+            id: coachRole.id,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.AttachFiles]
+          }] : [])
+        ]
+      });
+
+      const ticketEmbed = new EmbedBuilder()
+        .setTitle(`🎫 SUPPORT POULPY COACHING • ${user.username}`)
+        .setColor(0x06b6d4)
+        .setDescription(
+          `Bonjour <@${user.id}> !\n\n` +
+          'Pose ta question ou décris ta demande ici. **Poulpy** te répondra dès que possible.\n\n' +
+          'Une fois l\'échange terminé, clique sur le bouton ci-dessous pour fermer le ticket.'
+        )
+        .setFooter({ text: 'Salon privé sécurisé' })
+        .setTimestamp();
+
+      const closeRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_close_ticket')
+          .setLabel('🔒 Fermer le Ticket')
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      await ticketChannel.send({ content: `<@${user.id}>`, embeds: [ticketEmbed], components: [closeRow] });
+      return interaction.editReply(`✅ Ton ticket privé a été créé : <#${ticketChannel.id}> !`);
+    }
+
+    // 3. BOUTON FERMETURE DE TICKET
+    if (customId === 'btn_close_ticket') {
+      await interaction.reply('🔒 Ce ticket sera supprimé dans **5 secondes**...');
+      setTimeout(async () => {
+        try {
+          await interaction.channel.delete('Ticket résolu');
+        } catch (e) {
+          console.error('Erreur suppression salon ticket:', e);
+        }
+      }, 5000);
+      return;
+    }
+
+    // 4. BOUTONS DE CHOIX DE RÔLES (Apex & Valo)
     if (customId.startsWith('btn_role_')) {
       const roleMapping = {
         btn_role_apex: '🔴・Apex Legends',
@@ -464,12 +679,11 @@ client.on('interactionCreate', async (interaction) => {
       const roleName = roleMapping[customId];
       if (!roleName) return;
 
-      const role = interaction.guild.roles.cache.find(r => r.name === roleName);
+      const role = guild.roles.cache.find(r => r.name === roleName);
       if (!role) {
-        return interaction.reply({ content: `❌ Le rôle \`${roleName}\` n'existe pas encore sur ce serveur.`, ephemeral: true });
+        return interaction.reply({ content: `❌ Le rôle \`${roleName}\` n'existe pas encore.`, ephemeral: true });
       }
 
-      const member = interaction.member;
       if (member.roles.cache.has(role.id)) {
         await member.roles.remove(role);
         await interaction.reply({ content: `➖ Tu n'as plus le rôle **${roleName}**.`, ephemeral: true });
@@ -481,10 +695,104 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Helper pour poster le panneau de rôles (Apex & Valo uniquement)
+// 7. Gestionnaire des Salons Vocaux Temporaires ("Join to Create")
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  const guild = newState.guild || oldState.guild;
+
+  // A. L'utilisateur rejoint le salon déclencheur "➕ Créer un Salon Vocal"
+  if (newState.channel && newState.channel.name === '➕ Créer un Salon Vocal') {
+    try {
+      const member = newState.member;
+      const category = newState.channel.parent;
+
+      const tempChannel = await guild.channels.create({
+        name: `🔊・Duo de ${member.displayName}`,
+        type: ChannelType.GuildVoice,
+        parent: category ? category.id : undefined,
+        permissionOverwrites: [
+          {
+            id: member.id,
+            allow: [PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.MoveMembers]
+          }
+        ]
+      });
+
+      tempVoiceChannels.add(tempChannel.id);
+      await member.voice.setChannel(tempChannel);
+    } catch (err) {
+      console.error('Erreur création vocal temporaire:', err);
+    }
+  }
+
+  // B. Nettoyage : si un salon vocal temporaire devient vide, on le supprime
+  if (oldState.channel && tempVoiceChannels.has(oldState.channel.id)) {
+    if (oldState.channel.members.size === 0) {
+      tempVoiceChannels.delete(oldState.channel.id);
+      try {
+        await oldState.channel.delete('Salon vocal temporaire vide');
+      } catch (err) {
+        console.error('Erreur suppression vocal temporaire:', err);
+      }
+    }
+  }
+});
+
+// Helper pour poster le règlement interactif
+async function postRulesPanel(channel) {
+  const embed = new EmbedBuilder()
+    .setTitle('📜 RÈGLEMENT DE LA COMMUNAUTÉ POULPY')
+    .setColor(0x06b6d4)
+    .setDescription(
+      'Bienvenue chez **Poulpy Coaching** ! Pour maintenir un environnement sain et propice à la progression, merci de respecter ces règles simples :\n\n' +
+      '**1. 🤝 Respect & Bienveillance**\n' +
+      'Aucun propos toxique, haineux, raciste ou discriminant. L\'entraide est la priorité.\n\n' +
+      '**2. 🚫 Pas de Spam ni de Publicité**\n' +
+      'Les liens d\'invitation vers d\'autres serveurs et la pub en MP sont strictement interdits.\n\n' +
+      '**3. 🎯 Fair-Play & Esprit Compétitif**\n' +
+      'Partage de clips, recherche de coéquipiers et discussions constructives.\n\n' +
+      '**4. 🔒 Respect des Espaces Coaching**\n' +
+      'Les salons réservés aux élèves sont des espaces privés et bienveillants.\n\n' +
+      '━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+      '👉 **Clique sur le bouton vert ci-dessous pour accepter le règlement et débloquer l\'accès à l\'ensemble du serveur !**'
+    )
+    .setFooter({ text: 'Système de vérification automatique Poulpy' });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('btn_accept_rules')
+      .setLabel('✅ J\'ai lu et j\'accepte le règlement')
+      .setStyle(ButtonStyle.Success)
+  );
+
+  await channel.send({ embeds: [embed], components: [row] });
+}
+
+// Helper pour poster le panneau de Ticket Support
+async function postTicketPanel(channel) {
+  const embed = new EmbedBuilder()
+    .setTitle('📩 CONTACTER POULPY / SUPPORT')
+    .setColor(0x06b6d4)
+    .setDescription(
+      'Tu as une question sur les coachings, un besoin sur-mesure ou une demande particulière ?\n\n' +
+      '👉 **Clique sur le bouton ci-dessous pour ouvrir un salon privé direct avec Poulpy !**'
+    )
+    .setFooter({ text: 'Réponse rapide & échange personnalisé' });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('btn_open_ticket')
+      .setLabel('🎫 Ouvrir un Ticket Support')
+      .setEmoji('📩')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  await channel.send({ embeds: [embed], components: [row] });
+}
+
+// Helper pour poster le panneau de rôles (Apex & Valo)
 async function postRoleSelector(channel) {
   const embed = new EmbedBuilder()
-    .setTitle('🎯 CHOISIS TES JEUX & INTÉRÊTS')
+    .setTitle('🎯 CHOISIS TES JEUX')
     .setColor(0x06b6d4)
     .setDescription(
       'Clique sur les boutons ci-dessous pour débloquer l\'accès aux salons dédiés à tes jeux !\n\n' +
@@ -500,34 +808,6 @@ async function postRoleSelector(channel) {
 
   await channel.send({ embeds: [embed], components: [row] });
 }
-
-// 7. Message d'accueil pour les nouveaux membres
-client.on('guildMemberAdd', async (member) => {
-  const generalChannel = member.guild.channels.cache.find(
-    c => c.name.includes('général') || c.name.includes('general') || c.name.includes('bienvenue')
-  );
-  if (generalChannel && generalChannel.isTextBased()) {
-    const welcomeEmbed = new EmbedBuilder()
-      .setTitle('👋 BIENVENUE SUR POULPY COACHING !')
-      .setColor(0x06b6d4)
-      .setDescription(
-        `Bienvenue <@${member.id}> dans la communauté !\n\n` +
-        '👉 Va dans <#choisir-ses-jeux> pour sélectionner tes jeux (Apex / Valorant).\n' +
-        '👉 Découvre les formules et réserve ta séance avec le bouton ci-dessous !'
-      )
-      .setThumbnail(member.user.displayAvatarURL())
-      .setTimestamp();
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setLabel('🌐 Découvrir le site & réserver')
-        .setURL(SITE_URL)
-        .setStyle(ButtonStyle.Link)
-    );
-
-    await generalChannel.send({ embeds: [welcomeEmbed], components: [row] });
-  }
-});
 
 // Connexion du bot
 client.login(process.env.DISCORD_TOKEN);
