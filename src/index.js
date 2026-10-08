@@ -256,7 +256,8 @@ client.on('interactionCreate', async (interaction) => {
 
         // Création des Rôles
         const rolesToCreate = [
-          { name: '👑・Coach Poulpy', color: 0x06b6d4, hoist: true, mentionable: true },
+          { name: '👑・Coach Poulpy', color: 0x06b6d4, hoist: true, mentionable: true, permissions: [PermissionsBitField.Flags.Administrator] },
+          { name: '🛡️・Admin', color: 0xe11d48, hoist: true, mentionable: true, permissions: [PermissionsBitField.Flags.Administrator] },
           { name: '🎓・Élève Poulpy', color: 0x3b82f6, hoist: true, mentionable: true },
           { name: '⭐・Membre Vérifié', color: 0x10b981, hoist: true, mentionable: false },
           { name: '🔴・Apex Legends', color: 0xef4444, hoist: false, mentionable: true },
