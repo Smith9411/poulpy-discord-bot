@@ -245,6 +245,9 @@ client.on('interactionCreate', async (interaction) => {
 
     // 1. COMMANDE /SETUP-SERVER
     if (commandName === 'setup-server') {
+      if (!interaction.memberPermissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '⛔ Cette commande est strictement réservée à Poulpy (Admin) !', ephemeral: true });
+      }
       await interaction.deferReply({ ephemeral: true });
       const guild = interaction.guild;
 
@@ -477,6 +480,9 @@ client.on('interactionCreate', async (interaction) => {
 
     // 2. COMMANDE /FIX-PERMISSIONS
     if (commandName === 'fix-permissions') {
+      if (!interaction.memberPermissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '⛔ Cette commande est strictement réservée à Poulpy (Admin) !', ephemeral: true });
+      }
       await interaction.deferReply({ ephemeral: true });
       try {
         await applyServerPermissions(interaction.guild);
@@ -487,26 +493,38 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    // 2. COMMANDE /RULES
+    // 3. COMMANDE /RULES
     if (commandName === 'rules') {
+      if (!interaction.memberPermissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '⛔ Cette commande est strictement réservée à Poulpy (Admin) !', ephemeral: true });
+      }
       await postRulesPanel(interaction.channel);
       await interaction.reply({ content: '✅ Panneau de règlement envoyé !', ephemeral: true });
     }
 
-    // 3. COMMANDE /TICKET-PANEL
+    // 4. COMMANDE /TICKET-PANEL
     if (commandName === 'ticket-panel') {
+      if (!interaction.memberPermissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '⛔ Cette commande est strictement réservée à Poulpy (Admin) !', ephemeral: true });
+      }
       await postTicketPanel(interaction.channel);
       await interaction.reply({ content: '✅ Panneau de ticket envoyé !', ephemeral: true });
     }
 
-    // 4. COMMANDE /ROLES
+    // 5. COMMANDE /ROLES
     if (commandName === 'roles') {
+      if (!interaction.memberPermissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '⛔ Cette commande est strictement réservée à Poulpy (Admin) !', ephemeral: true });
+      }
       await postRoleSelector(interaction.channel);
       await interaction.reply({ content: '✅ Panneau de rôles envoyé !', ephemeral: true });
     }
 
-    // 5. COMMANDE /ANNONCE
+    // 6. COMMANDE /ANNONCE
     if (commandName === 'annonce') {
+      if (!interaction.memberPermissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '⛔ Cette commande est strictement réservée à Poulpy (Admin) !', ephemeral: true });
+      }
       const titre = interaction.options.getString('titre');
       const message = interaction.options.getString('message');
       const mention = interaction.options.getString('mention') || 'none';
