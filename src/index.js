@@ -648,18 +648,22 @@ client.on('interactionCreate', async (interaction) => {
 
     // 1. BOUTON D'ACCEPTATION DU RÈGLEMENT (Vérification Anti-Raid)
     if (customId === 'btn_accept_rules') {
-      const membreRole = guild.roles.cache.find(r => r.name === '⭐・Membre Vérifié');
-      if (!membreRole) {
-        return interaction.reply({ content: '❌ Rôle introuvable. Tapez `/setup-server` d\'abord.', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true }).catch(() => {});
+      try {
+        const roles = await guild.roles.fetch();
+        const membreRole = roles.find(r => r.name === '⭐・Membre Vérifié');
+        if (!membreRole) {
+          return interaction.editReply('❌ Rôle `⭐・Membre Vérifié` introuvable. Tapez `/setup-server` d\'abord.');
+        }
+        if (member.roles.cache.has(membreRole.id)) {
+          return interaction.editReply('✅ Tu as déjà accepté le règlement et validé ton accès !');
+        }
+        await member.roles.add(membreRole);
+        return interaction.editReply('🎉 **Bienvenue !** Tu as accepté le règlement. Tous les salons de la communauté te sont désormais ouverts !');
+      } catch (e) {
+        console.error('Erreur accept rules:', e);
+        return interaction.editReply('❌ Une erreur est survenue.');
       }
-      if (member.roles.cache.has(membreRole.id)) {
-        return interaction.reply({ content: '✅ Tu as déjà accepté le règlement et validé ton accès !', ephemeral: true });
-      }
-      await member.roles.add(membreRole);
-      return interaction.reply({
-        content: '🎉 **Bienvenue !** Tu as accepté le règlement. Tous les salons de la communauté te sont désormais ouverts !',
-        ephemeral: true
-      });
     }
 
     // 2. BOUTON CRÉATION DE TICKET
@@ -738,6 +742,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // 4. BOUTONS DE CHOIX DE RÔLES (Apex & Valo)
     if (customId.startsWith('btn_role_')) {
+      await interaction.deferReply({ ephemeral: true }).catch(() => {});
       const roleMapping = {
         btn_role_apex: '🔴・Apex Legends',
         btn_role_valo: '🟣・Valorant'
@@ -746,17 +751,18 @@ client.on('interactionCreate', async (interaction) => {
       const roleName = roleMapping[customId];
       if (!roleName) return;
 
-      const role = guild.roles.cache.find(r => r.name === roleName);
+      const roles = await guild.roles.fetch();
+      const role = roles.find(r => r.name === roleName);
       if (!role) {
-        return interaction.reply({ content: `❌ Le rôle \`${roleName}\` n'existe pas encore.`, ephemeral: true });
+        return interaction.editReply(`❌ Le rôle \`${roleName}\` n'existe pas encore.`);
       }
 
       if (member.roles.cache.has(role.id)) {
         await member.roles.remove(role);
-        await interaction.reply({ content: `➖ Tu n'as plus le rôle **${roleName}**.`, ephemeral: true });
+        await interaction.editReply(`➖ Tu n'as plus le rôle **${roleName}**.`);
       } else {
         await member.roles.add(role);
-        await interaction.reply({ content: `➕ Tu as reçu le rôle **${roleName}** !`, ephemeral: true });
+        await interaction.editReply(`➕ Tu as reçu le rôle **${roleName}** !`);
       }
     }
   }
