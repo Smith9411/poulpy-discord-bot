@@ -53,16 +53,16 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildVoiceStates
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.GuildMember]
 });
 
-// Gestionnaire d'erreurs global (Empêche tout crash)
-client.on('error', (err) => console.error('⚠️ Discord Client Error:', err.message));
+// Gestionnaires de connexion et d'erreurs
+client.on('error', (err) => console.error('⚠️ Discord Client Error:', err));
+client.on('warn', (warning) => console.warn('⚠️ Discord Client Warning:', warning));
+client.on('shardReady', (id) => console.log(`🔌 Shard ${id} connecté à Discord Gateway !`));
 process.on('unhandledRejection', (reason) => console.error('⚠️ Unhandled Rejection:', reason));
 process.on('uncaughtException', (err) => console.error('⚠️ Uncaught Exception:', err));
 
@@ -1389,7 +1389,9 @@ if (!process.env.DISCORD_TOKEN) {
   console.error("❌ ERREUR CRITIQUE: DISCORD_TOKEN est manquant dans l'environnement ! Configurez-le dans le dashboard Render (onglet Environment).");
 } else {
   console.log("🔑 DISCORD_TOKEN trouvé, connexion à la passerelle Discord en cours...");
-  client.login(process.env.DISCORD_TOKEN).catch(err => {
+  client.login(process.env.DISCORD_TOKEN).then(() => {
+    console.log("⚡ Authentification Discord validée par les serveurs Discord !");
+  }).catch(err => {
     console.error("❌ Erreur client.login :", err);
   });
 }
