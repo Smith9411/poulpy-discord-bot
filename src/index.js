@@ -1385,4 +1385,11 @@ client.on('guildMemberAdd', async (member) => {
 });
 
 // Connexion du bot
-client.login(process.env.DISCORD_TOKEN);
+if (!process.env.DISCORD_TOKEN) {
+  console.error("❌ ERREUR CRITIQUE: DISCORD_TOKEN est manquant dans l'environnement ! Configurez-le dans le dashboard Render (onglet Environment).");
+} else {
+  console.log("🔑 DISCORD_TOKEN trouvé, connexion à la passerelle Discord en cours...");
+  client.login(process.env.DISCORD_TOKEN).catch(err => {
+    console.error("❌ Erreur client.login :", err);
+  });
+}
