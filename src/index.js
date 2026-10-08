@@ -133,16 +133,33 @@ const commands = [
     .setDescription('🏓 Vérifie la latence du bot')
 ];
 
-// Enregistrement des commandes auprès de Discord
+// Enregistrement des commandes auprès de Discord (Global + Instant Guilds)
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
     console.log('🔄 Enregistrement des Slash Commands...');
+    const body = commands.map(cmd => cmd.toJSON());
+
+    // 1. Enregistrement global
     await rest.put(
       Routes.applicationCommands(process.env.CLIENT_ID),
-      { body: commands.map(cmd => cmd.toJSON()) }
+      { body }
     );
-    console.log('✅ Slash Commands enregistrées avec succès !');
+
+    // 2. Enregistrement instantané par serveur (contourne le cache Discord)
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        await rest.put(
+          Routes.applicationGuildCommands(process.env.CLIENT_ID, guild.id),
+          { body }
+        );
+        console.log(`⚡ Commandes instantanées activées sur le serveur : ${guild.name}`);
+      } catch (err) {
+        console.error(`Impossible d'enregistrer sur le serveur ${guild.name}:`, err);
+      }
+    }
+
+    console.log('✅ Slash Commands prêtes et instantanées !');
   } catch (error) {
     console.error('❌ Erreur lors de l\'enregistrement des commandes :', error);
   }
