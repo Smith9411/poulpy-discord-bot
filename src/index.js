@@ -295,6 +295,65 @@ async function broadcastBookingAlert(booking) {
         console.error(`Impossible d'envoyer dans ${guild.name} :`, err);
       }
     }
+
+    // 2. Recherche et notification en Message Privé (MP) de l'élève + Attribution du rôle Élève
+    const cleanHandle = studentDiscord.replace(/^@/, '').trim().toLowerCase();
+    if (cleanHandle && cleanHandle !== 'non renseigné') {
+      try {
+        const members = await guild.members.fetch();
+        const studentMember = members.find(m =>
+          m.user.username.toLowerCase() === cleanHandle ||
+          m.user.tag.toLowerCase() === cleanHandle ||
+          m.displayName.toLowerCase() === cleanHandle ||
+          m.id === cleanHandle
+        );
+
+        if (studentMember) {
+          console.log(`👤 Élève trouvé sur Discord : ${studentMember.user.tag} (Serveur : ${guild.name})`);
+
+          // Attribution automatique du rôle Élève Poulpy
+          const eleveRole = guild.roles.cache.find(r => r.name === '🎓・Élève Poulpy');
+          if (eleveRole && !studentMember.roles.cache.has(eleveRole.id)) {
+            await studentMember.roles.add(eleveRole).catch(e => console.log('Erreur ajout rôle élève:', e.message));
+          }
+
+          // Message Privé de Confirmation
+          const studentEmbed = new EmbedBuilder()
+            .setTitle('🐙 CONFIRMATION DE TA RÉSERVATION • POULPY COACHING')
+            .setColor(0x06b6d4)
+            .setDescription(
+              `Salut **${studentName}** ! 🎉\n\n` +
+              `Ta réservation pour une séance de coaching sur **${game}** a bien été enregistrée et confirmée avec **Poulpy**.`
+            )
+            .addFields(
+              { name: '📦 Formule', value: `**${plan}** (${price})`, inline: true },
+              { name: '📅 Date & Heure', value: `**${date}** à **${time}**`, inline: true },
+              { name: '🎙️ Où se déroule le coaching ?', value: 'Sur le serveur Discord dans le salon vocal **`🎙️ Coaching 1-on-1`** (tu as désormais accès aux salons privés élèves).' },
+              { name: '📝 Comment bien te préparer ?', value: '• Connecte-toi sur Discord 5 minutes avant l\'heure prévue.\n• Si tu as des VODs ou des questions, tu peux utiliser la commande `/vod` sur le serveur ou les partager dans le salon `#📁・partage-vod`.' }
+            )
+            .setFooter({ text: 'Poulpy Coaching • À très vite en session !' })
+            .setTimestamp();
+
+          const studentRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setLabel('📊 Mon Espace de Suivi')
+              .setURL(`${SITE_URL}/profile/coaching`)
+              .setStyle(ButtonStyle.Link),
+            new ButtonBuilder()
+              .setLabel('🌐 Site Web')
+              .setURL(SITE_URL)
+              .setStyle(ButtonStyle.Link)
+          );
+
+          await studentMember.send({ embeds: [studentEmbed], components: [studentRow] }).catch(err => {
+            console.warn(`Impossible d'envoyer le MP à ${studentMember.user.tag} (DMs fermés) :`, err.message);
+          });
+          console.log(`✉️ MP de confirmation envoyé à l'élève : ${studentMember.user.tag}`);
+        }
+      } catch (err) {
+        console.error('Erreur recherche membre élève pour MP:', err.message);
+      }
+    }
   }
 }
 
