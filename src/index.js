@@ -17,6 +17,7 @@ const { createClient } = require('@supabase/supabase-js');
 const http = require('http');
 
 const SITE_URL = process.env.SITE_URL || 'https://poulpy-coaching.vercel.app';
+const RENDER_URL = process.env.RENDER_URL || 'https://poulpy-discord-bot.onrender.com';
 const PORT = process.env.PORT || 3000;
 
 // Serveur Web pour Uptime / Render / Cloud Host
@@ -26,6 +27,20 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   console.log(`🌐 Serveur Web actif sur le port ${PORT}`);
 });
+
+// Système Anti-Veille (Keep-Alive 24/7) : ping toutes les 8 minutes pour empêcher Render de s'endormir
+setInterval(async () => {
+  try {
+    const https = require('https');
+    https.get(RENDER_URL, (res) => {
+      console.log(`⏱️ Keep-Alive Ping envoyé à ${RENDER_URL} (Status: ${res.statusCode})`);
+    }).on('error', (e) => {
+      console.log('Keep-alive ping error:', e.message);
+    });
+  } catch (err) {
+    console.error('Keep-alive ping err:', err);
+  }
+}, 8 * 60 * 1000); // 8 minutes
 
 // 1. Initialisation Supabase
 const supabase = createClient(
