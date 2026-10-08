@@ -20,27 +20,49 @@ const SITE_URL = process.env.SITE_URL || 'https://poulpy-coaching.vercel.app';
 const RENDER_URL = process.env.RENDER_URL || 'https://poulpy-discord-bot.onrender.com';
 const PORT = process.env.PORT || 3000;
 
-// Serveur Web pour Uptime / Render / Cloud Host
-http.createServer((req, res) => {
+// Serveur Web pour Uptime / Diagnostic / Cloud Host
+http.createServer(async (req, res) => {
+  if (req.url === '/diag') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    try {
+      const https = require('https');
+      const testDiscord = await new Promise((resolve) => {
+        const token = process.env.DISCORD_TOKEN || '';
+        const options = {
+          hostname: 'discord.com',
+          path: '/api/v10/gateway/bot',
+          method: 'GET',
+          headers: {
+            'Authorization': `Bot ${token}`,
+            'User-Agent': 'DiscordBot (https://poulpy-coaching.vercel.app, 1.0.0)'
+          }
+        };
+        const r = https.request(options, (resp) => {
+          let data = '';
+          resp.on('data', chunk => data += chunk);
+          resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
+        });
+        r.on('error', (err) => resolve({ error: err.message }));
+        r.setTimeout(5000, () => { r.destroy(); resolve({ error: 'Timeout 5s connecting to discord.com' }); });
+        r.end();
+      });
+
+      return res.end(JSON.stringify({
+        uptime: process.uptime(),
+        clientStatus: client.ws?.status,
+        clientReady: client.isReady(),
+        testDiscord
+      }, null, 2));
+    } catch (e) {
+      return res.end(JSON.stringify({ error: e.message }));
+    }
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('🐙 Poulpy Discord Bot is Alive & Running 24/7 !');
+  res.end(`🐙 Poulpy Discord Bot is Alive & Running 24/7 ! Status: ${client.isReady() ? 'READY' : 'CONNECTING'}`);
 }).listen(PORT, () => {
   console.log(`🌐 Serveur Web actif sur le port ${PORT}`);
 });
-
-// Système Anti-Veille (Keep-Alive 24/7) : ping toutes les 8 minutes pour empêcher Render de s'endormir
-setInterval(async () => {
-  try {
-    const https = require('https');
-    https.get(RENDER_URL, (res) => {
-      console.log(`⏱️ Keep-Alive Ping envoyé à ${RENDER_URL} (Status: ${res.statusCode})`);
-    }).on('error', (e) => {
-      console.log('Keep-alive ping error:', e.message);
-    });
-  } catch (err) {
-    console.error('Keep-alive ping err:', err);
-  }
-}, 8 * 60 * 1000); // 8 minutes
 
 // 1. Initialisation Supabase
 const supabase = createClient(
