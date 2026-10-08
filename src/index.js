@@ -290,6 +290,11 @@ client.on('interactionCreate', async (interaction) => {
           name: '📌・ACCUEIL & INFOS',
           type: ChannelType.GuildCategory
         });
+        const chanBienvenue = await guild.channels.create({
+          name: '👋・bienvenue',
+          type: ChannelType.GuildText,
+          parent: catInfos.id
+        });
         const chanRegles = await guild.channels.create({
           name: '📜・règlement-et-accès',
           type: ChannelType.GuildText,
@@ -882,7 +887,7 @@ async function applyServerPermissions(guild) {
 
     // 1. Catégorie & Salons ACCUEIL & INFOS
     // Règle : @everyone peut voir et lire les messages et cliquer sur les boutons, mais NE PEUT PAS écrire
-    if (channel.name.includes('ACCUEIL') || ['📜・règlement-et-accès', '📢・annonces', '🔗・liens-utiles', '🎯・choisir-ses-jeux', '📩・contacter-poulpy'].includes(channel.name)) {
+    if (channel.name.includes('ACCUEIL') || ['👋・bienvenue', '📜・règlement-et-accès', '📢・annonces', '🔗・liens-utiles', '🎯・choisir-ses-jeux', '📩・contacter-poulpy'].includes(channel.name)) {
       await channel.permissionOverwrites.edit(everyone, {
         ViewChannel: true,
         ReadMessageHistory: true,
@@ -998,6 +1003,36 @@ async function applyServerPermissions(guild) {
     }
   }
 }
+
+// 8. Message d'accueil automatique dans #👋・bienvenue
+client.on('guildMemberAdd', async (member) => {
+  const bienvenueChannel = member.guild.channels.cache.find(
+    c => c.name.includes('bienvenue')
+  );
+  if (bienvenueChannel && bienvenueChannel.isTextBased()) {
+    const welcomeEmbed = new EmbedBuilder()
+      .setTitle('👋 BIENVENUE SUR POULPY COACHING !')
+      .setColor(0x06b6d4)
+      .setDescription(
+        `Bienvenue <@${member.id}> dans la communauté !\n\n` +
+        '👉 Va dans <#📜・règlement-et-accès> pour **accepter le règlement** et débloquer les salons.\n' +
+        '👉 Sélectionne tes jeux dans <#🎯・choisir-ses-jeux> (Apex / Valorant).\n' +
+        `👉 Découvre nos formules de coaching et réserve sur le site !`
+      )
+      .setThumbnail(member.user.displayAvatarURL())
+      .setFooter({ text: 'Optimisation Esport & Biomécanique de l\'Aim' })
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel('🌐 Découvrir le Site Web')
+        .setURL(SITE_URL)
+        .setStyle(ButtonStyle.Link)
+    );
+
+    await bienvenueChannel.send({ content: `<@${member.id}>`, embeds: [welcomeEmbed], components: [row] });
+  }
+});
 
 // Connexion du bot
 client.login(process.env.DISCORD_TOKEN);
