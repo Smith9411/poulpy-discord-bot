@@ -204,7 +204,7 @@ let lastKnownBookingId = null;
 function listenToSupabaseBookings() {
   console.log('📡 Écoute des réservations Supabase sur la table coaching_bookings...');
 
-  // A. Supabase Realtime WebSocket
+  // A. Supabase Realtime WebSocket (INSERT & UPDATE)
   supabase
     .channel('discord_bot_coaching_bookings')
     .on(
@@ -215,6 +215,16 @@ function listenToSupabaseBookings() {
         console.log('🚨 [Realtime] Nouvelle réservation reçue via Supabase :', booking);
         lastKnownBookingId = booking.id;
         await broadcastBookingAlert(booking);
+      }
+    )
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'coaching_bookings' },
+      async (payload) => {
+        const oldBooking = payload.old;
+        const newBooking = payload.new;
+        console.log('🔄 [Realtime] Réservation mise à jour :', newBooking);
+        await broadcastBookingUpdate(oldBooking, newBooking);
       }
     )
     .subscribe();
@@ -242,6 +252,101 @@ function listenToSupabaseBookings() {
       console.error('Erreur polling bookings:', e.message);
     }
   }, 15000); // 15 secondes
+}
+
+// Gestion des mises à jour / déplacements / annulations
+async function broadcastBookingUpdate(oldBooking, newBooking) {
+  const studentName = newBooking.student_name || 'Élève';
+  const studentDiscord = newBooking.student_discord || '';
+  const game = newBooking.game || 'Valorant';
+  const plan = newBooking.plan_name || 'Coaching';
+  const date = newBooking.booking_date || '';
+  const time = newBooking.booking_time || '';
+  const status = newBooking.status;
+
+  const isCancelled = status === 'cancelled' || status === 'annulé';
+  const isRescheduled = oldBooking && (oldBooking.booking_date !== newBooking.booking_date || oldBooking.booking_time !== newBooking.booking_time);
+
+  // 1. Embed pour le Coach dans #alertes-réservations
+  const embed = new EmbedBuilder()
+    .setTitle(isCancelled ? '🔴 RÉSERVATION ANNULÉE !' : '🟡 RÉSERVATION MODIFIÉE / DÉPLACÉE !')
+    .setColor(isCancelled ? 0xef4444 : 0xeab308)
+    .setThumbnail(`${SITE_URL}/logo.png`)
+    .addFields(
+      { name: '👤 Élève', value: `**${studentName}** (\`${studentDiscord}\`)`, inline: true },
+      { name: '🎮 Jeu & Formule', value: `${game} • ${plan}`, inline: true },
+      { name: '📅 Date & Heure', value: `**${date}** à **${time}**`, inline: true },
+      { name: '📊 Nouveau Statut', value: `**${status || 'Mis à jour'}**`, inline: true }
+    )
+    .setFooter({ text: 'Poulpy Coaching System' })
+    .setTimestamp();
+
+  if (isRescheduled && oldBooking) {
+    embed.addFields({ name: '⏱️ Ancien créneau', value: `${oldBooking.booking_date || ''} à ${oldBooking.booking_time || ''}` });
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setLabel('📋 Gérer les réservations')
+      .setURL(`${SITE_URL}/admin/bookings`)
+      .setStyle(ButtonStyle.Link)
+  );
+
+  for (const guild of client.guilds.cache.values()) {
+    const alertChannel = guild.channels.cache.find(
+      c => c.name.includes('alertes-réservations') || c.name.includes('reservations') || c.name.includes('coach-admin')
+    );
+    if (alertChannel && alertChannel.isTextBased()) {
+      try {
+        const coachRole = guild.roles.cache.find(r => r.name === '👑・Coach Poulpy');
+        const pingMention = coachRole ? `<@&${coachRole.id}>` : (guild.ownerId ? `<@${guild.ownerId}>` : '');
+        await alertChannel.send({
+          content: `${pingMention} ${isCancelled ? '🔴' : '🟡'} **Notification mise à jour de séance :**`,
+          embeds: [embed],
+          components: [row]
+        });
+      } catch (err) {
+        console.error('Erreur envoi alerte update:', err);
+      }
+    }
+
+    // 2. Notification en MP à l'élève
+    const cleanHandle = studentDiscord.replace(/^@/, '').trim().toLowerCase();
+    if (cleanHandle) {
+      try {
+        const members = await guild.members.fetch();
+        const studentMember = members.find(m =>
+          m.user.username.toLowerCase() === cleanHandle ||
+          m.user.tag.toLowerCase() === cleanHandle ||
+          m.displayName.toLowerCase() === cleanHandle ||
+          m.id === cleanHandle
+        );
+
+        if (studentMember) {
+          const studentEmbed = new EmbedBuilder()
+            .setTitle(isCancelled ? '🔴 ANNULATION DE TA SÉANCE • POULPY COACHING' : '🟡 MODIFICATION DE TON COACHING • POULPY COACHING')
+            .setColor(isCancelled ? 0xef4444 : 0xeab308)
+            .setDescription(
+              isCancelled
+                ? `Bonjour **${studentName}**,\n\nTa séance de coaching prévue le **${date} à ${time}** a bien été **annulée**.\nPour reprendre un créneau : [Accéder au site](${SITE_URL}/#booking)`
+                : `Bonjour **${studentName}** ! 🎉\n\nTa séance de coaching a été mise à jour :\n\n📅 **Nouveau créneau : ${date} à ${time}**\n🎮 **Jeu : ${game}**\n\nÀ très vite sur le vocal !`
+            )
+            .setTimestamp();
+
+          const studentRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setLabel('📊 Mon Espace de Suivi')
+              .setURL(`${SITE_URL}/profile/coaching`)
+              .setStyle(ButtonStyle.Link)
+          );
+
+          await studentMember.send({ embeds: [studentEmbed], components: [studentRow] }).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Erreur MP student update:', e.message);
+      }
+    }
+  }
 }
 
 async function broadcastBookingAlert(booking) {
@@ -1220,6 +1325,62 @@ client.on('guildMemberAdd', async (member) => {
     } catch (err) {
       console.error('Erreur envoi carte de bienvenue:', err);
     }
+  }
+
+  // 9. Vérification si le nouveau membre a déjà réservé un cours sur le site
+  try {
+    const cleanUsername = member.user.username.toLowerCase();
+    const cleanTag = member.user.tag.toLowerCase();
+
+    const { data: existingBookings, error } = await supabase
+      .from('coaching_bookings')
+      .select('*')
+      .eq('status', 'confirmed')
+      .order('created_at', { ascending: false });
+
+    if (!error && existingBookings) {
+      const match = existingBookings.find(b => {
+        const d = (b.student_discord || '').replace(/^@/, '').trim().toLowerCase();
+        return d && (d === cleanUsername || d === cleanTag || cleanUsername.includes(d) || d.includes(cleanUsername));
+      });
+
+      if (match) {
+        console.log(`🎓 Nouveau membre avec réservation existante détecté : ${member.user.tag}`);
+
+        // Attribuer le rôle Élève
+        const eleveRole = member.guild.roles.cache.find(r => r.name === '🎓・Élève Poulpy');
+        if (eleveRole && !member.roles.cache.has(eleveRole.id)) {
+          await member.roles.add(eleveRole).catch(console.error);
+        }
+
+        // Envoyer le MP de récapitulatif
+        const recapEmbed = new EmbedBuilder()
+          .setTitle('🐙 BIENVENUE SUR LE DISCORD • TON COACHING EST CONFIRMÉ')
+          .setColor(0x06b6d4)
+          .setDescription(
+            `Salut **${match.student_name || member.user.username}** ! 🎉\n\n` +
+            `Tu avais déjà réservé une séance de coaching sur **${match.game || 'Valorant'}** avant de rejoindre le serveur.`
+          )
+          .addFields(
+            { name: '📦 Formule', value: `**${match.plan_name || 'Coaching'}**`, inline: true },
+            { name: '📅 Date & Heure', value: `**${match.booking_date || ''}** à **${match.booking_time || ''}**`, inline: true },
+            { name: '🎙️ Où se déroule le coaching ?', value: 'Dans le salon vocal **`🎙️ Coaching 1-on-1`** (le rôle Élève t\'a été attribué automatiquement).' }
+          )
+          .setFooter({ text: 'Poulpy Coaching • À très vite en session !' })
+          .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel('📊 Mon Espace de Suivi')
+            .setURL(`${SITE_URL}/profile/coaching`)
+            .setStyle(ButtonStyle.Link)
+        );
+
+        await member.send({ embeds: [recapEmbed], components: [row] }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error('Erreur vérification réservation nouveau membre:', err);
   }
 });
 
