@@ -64,6 +64,21 @@ http.createServer(async (req, res) => {
   console.log(`🌐 Serveur Web actif sur le port ${PORT}`);
 });
 
+// Système Anti-Veille (Keep-Alive 24/7) : ping toutes les 8 minutes pour maintenir Render éveillé en continu
+const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://poulpy-bot-eu.onrender.com';
+setInterval(async () => {
+  try {
+    const https = require('https');
+    https.get(KEEP_ALIVE_URL, (res) => {
+      console.log(`⏱️ Keep-Alive Ping envoyé à ${KEEP_ALIVE_URL} (Status: ${res.statusCode})`);
+    }).on('error', (e) => {
+      console.log('Keep-alive ping error:', e.message);
+    });
+  } catch (err) {
+    console.error('Keep-alive ping err:', err);
+  }
+}, 8 * 60 * 1000); // 8 minutes
+
 // 1. Initialisation Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
