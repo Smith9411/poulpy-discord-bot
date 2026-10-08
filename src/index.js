@@ -57,6 +57,11 @@ const commands = [
     .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator),
 
   new SlashCommandBuilder()
+    .setName('fix-permissions')
+    .setDescription('🔒 Ajuste et verrouille toutes les permissions des salons (Accueil en lecture seule, jeux, etc.)')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator),
+
+  new SlashCommandBuilder()
     .setName('rules')
     .setDescription('📜 Affiche le règlement officiel et le bouton de vérification')
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
@@ -460,10 +465,25 @@ client.on('interactionCreate', async (interaction) => {
         );
         await chanLiens.send({ embeds: [embedLiens], components: [rowLiens] });
 
-        await interaction.editReply('✅ **Serveur Poulpy Coaching 100 % configuré avec succès !**\n- Règlement interactif & Anti-raid en place\n- Système de Tickets privé prêt\n- Salons vocaux temporaires automatiques activés\n- Alertes réservations connectées');
+        // Appliquer le verrouillage des permissions
+        await applyServerPermissions(guild);
+
+        await interaction.editReply('✅ **Serveur Poulpy Coaching 100 % configuré avec succès !**\n- Règlement & Anti-raid en place\n- Permissions verrouillées (Accueil en lecture seule, jeux masqués sans rôle)\n- Système de Tickets prêt\n- Vocaux dynamiques activés');
       } catch (err) {
         console.error('Erreur setup-server :', err);
         await interaction.editReply(`❌ Erreur lors du setup : \`${err.message}\``);
+      }
+    }
+
+    // 2. COMMANDE /FIX-PERMISSIONS
+    if (commandName === 'fix-permissions') {
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        await applyServerPermissions(interaction.guild);
+        await interaction.editReply('🔒 **Toutes les permissions ont été verrouillées avec succès !**\n\n- 📌 **Accueil & Infos** : Strictement en lecture seule pour les membres (les boutons restent cliquables).\n- 🎮 **Esport & Jeux** : `#apex-legends` et `#valorant` visibles uniquement par ceux qui ont choisi le jeu.\n- 🎙️ **Vocaux & Coaching** : Totalement sécurisés et réservés aux membres vérifiés / élèves.');
+      } catch (err) {
+        console.error('Erreur fix-permissions:', err);
+        await interaction.editReply(`❌ Erreur lors de l'ajustement des permissions : \`${err.message}\``);
       }
     }
 
@@ -824,6 +844,140 @@ async function postRoleSelector(channel) {
   );
 
   await channel.send({ embeds: [embed], components: [row] });
+}
+
+// Helper pour verrouiller et ajuster précisément toutes les permissions du serveur
+async function applyServerPermissions(guild) {
+  const roles = await guild.roles.fetch();
+  const coachRole = roles.find(r => r.name === '👑・Coach Poulpy');
+  const eleveRole = roles.find(r => r.name === '🎓・Élève Poulpy');
+  const membreRole = roles.find(r => r.name === '⭐・Membre Vérifié');
+  const apexRole = roles.find(r => r.name === '🔴・Apex Legends');
+  const valoRole = roles.find(r => r.name === '🟣・Valorant');
+  const everyone = guild.roles.everyone;
+
+  const channels = await guild.channels.fetch();
+
+  for (const [, channel] of channels) {
+    if (!channel) continue;
+
+    // 1. Catégorie & Salons ACCUEIL & INFOS
+    // Règle : @everyone peut voir et lire les messages et cliquer sur les boutons, mais NE PEUT PAS écrire
+    if (channel.name.includes('ACCUEIL') || ['📜・règlement-et-accès', '📢・annonces', '🔗・liens-utiles', '🎯・choisir-ses-jeux', '📩・contacter-poulpy'].includes(channel.name)) {
+      await channel.permissionOverwrites.edit(everyone, {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        SendMessages: false,
+        AddReactions: false,
+        CreatePublicThreads: false,
+        CreatePrivateThreads: false
+      }).catch(() => {});
+
+      if (coachRole) {
+        await channel.permissionOverwrites.edit(coachRole, {
+          ViewChannel: true,
+          SendMessages: true,
+          ManageMessages: true,
+          EmbedLinks: true,
+          AttachFiles: true
+        }).catch(() => {});
+      }
+    }
+
+    // 2. Salons Spécifiques par Jeu
+    // #🔴・apex-legends : Visible uniquement si rôle Apex Legends
+    if (channel.name === '🔴・apex-legends') {
+      await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }).catch(() => {});
+      if (membreRole) await channel.permissionOverwrites.edit(membreRole, { ViewChannel: false }).catch(() => {});
+      if (apexRole) {
+        await channel.permissionOverwrites.edit(apexRole, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true,
+          AttachFiles: true,
+          EmbedLinks: true
+        }).catch(() => {});
+      }
+    }
+
+    // #🟣・valorant : Visible uniquement si rôle Valorant
+    if (channel.name === '🟣・valorant') {
+      await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }).catch(() => {});
+      if (membreRole) await channel.permissionOverwrites.edit(membreRole, { ViewChannel: false }).catch(() => {});
+      if (valoRole) {
+        await channel.permissionOverwrites.edit(valoRole, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true,
+          AttachFiles: true,
+          EmbedLinks: true
+        }).catch(() => {});
+      }
+    }
+
+    // 3. Salons Généraux Communauté (#💬・général, #🔥・clips-et-highlights)
+    if (['💬・général', '🔥・clips-et-highlights'].includes(channel.name)) {
+      await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }).catch(() => {});
+      if (membreRole) {
+        await channel.permissionOverwrites.edit(membreRole, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true,
+          AttachFiles: true,
+          EmbedLinks: true
+        }).catch(() => {});
+      }
+    }
+
+    // 4. Salons Vocaux
+    if (channel.name === '➕ Créer un Salon Vocal' || channel.name === '🔊 Chill & Aim Training') {
+      await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }).catch(() => {});
+      if (membreRole) {
+        await channel.permissionOverwrites.edit(membreRole, {
+          ViewChannel: true,
+          Connect: true,
+          Speak: true
+        }).catch(() => {});
+      }
+    }
+
+    // 5. Zone Coaching (Élèves & Coach uniquement)
+    if (['📁・partage-vod', '📝・debrief-et-suivi', '🎙️ Coaching 1-on-1', '⏳ Salle d\'attente'].includes(channel.name)) {
+      await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }).catch(() => {});
+      if (membreRole) await channel.permissionOverwrites.edit(membreRole, { ViewChannel: false }).catch(() => {});
+      if (eleveRole) {
+        await channel.permissionOverwrites.edit(eleveRole, {
+          ViewChannel: true,
+          SendMessages: true,
+          Connect: true,
+          Speak: true,
+          AttachFiles: true
+        }).catch(() => {});
+      }
+      if (coachRole) {
+        await channel.permissionOverwrites.edit(coachRole, {
+          ViewChannel: true,
+          SendMessages: true,
+          Connect: true,
+          Speak: true,
+          ManageChannels: true
+        }).catch(() => {});
+      }
+    }
+
+    // 6. Admin Poulpy (Secret)
+    if (channel.name === '🚨・alertes-réservations') {
+      await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }).catch(() => {});
+      if (membreRole) await channel.permissionOverwrites.edit(membreRole, { ViewChannel: false }).catch(() => {});
+      if (eleveRole) await channel.permissionOverwrites.edit(eleveRole, { ViewChannel: false }).catch(() => {});
+      if (coachRole) {
+        await channel.permissionOverwrites.edit(coachRole, {
+          ViewChannel: true,
+          SendMessages: true
+        }).catch(() => {});
+      }
+    }
+  }
 }
 
 // Connexion du bot
