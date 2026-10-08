@@ -1004,33 +1004,89 @@ async function applyServerPermissions(guild) {
   }
 }
 
-// 8. Message d'accueil automatique dans #👋・bienvenue
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const { AttachmentBuilder } = require('discord.js');
+
+// Générateur d'image de bienvenue style DraftBot
+async function generateWelcomeCard(avatarUrl, username, serverName) {
+  const width = 700;
+  const height = 250;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+
+  // Fond stylé sombre avec coins arrondis
+  ctx.fillStyle = '#232428';
+  ctx.beginPath();
+  ctx.roundRect(0, 0, width, height, 20);
+  ctx.fill();
+
+  // Bordure cyan Poulpy
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#06b6d4';
+  ctx.stroke();
+
+  // Photo de profil circulaire
+  try {
+    const avatar = await loadImage(avatarUrl);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(125, 125, 75, 0, Math.PI * 2, true);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(avatar, 50, 50, 150, 150);
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.arc(125, 125, 75, 0, Math.PI * 2, true);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#06b6d4';
+    ctx.stroke();
+  } catch (e) {
+    console.error('Erreur chargement avatar canvas:', e);
+  }
+
+  // Textes
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = 'bold 46px sans-serif';
+  ctx.fillText('Bienvenue', 240, 95);
+
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '22px sans-serif';
+  ctx.fillText('sur le serveur Discord', 240, 135);
+
+  ctx.fillStyle = '#06b6d4';
+  ctx.font = 'bold 28px sans-serif';
+  ctx.fillText(serverName || 'Poulpy Coaching', 240, 180);
+
+  return canvas.toBuffer('image/png');
+}
+
+// 8. Message d'accueil automatique avec carte personnalisée dans #👋・bienvenue
 client.on('guildMemberAdd', async (member) => {
   const bienvenueChannel = member.guild.channels.cache.find(
     c => c.name.includes('bienvenue')
   );
   if (bienvenueChannel && bienvenueChannel.isTextBased()) {
-    const welcomeEmbed = new EmbedBuilder()
-      .setTitle('👋 BIENVENUE SUR POULPY COACHING !')
-      .setColor(0x06b6d4)
-      .setDescription(
-        `Bienvenue <@${member.id}> dans la communauté !\n\n` +
-        '👉 Va dans <#📜・règlement-et-accès> pour **accepter le règlement** et débloquer les salons.\n' +
-        '👉 Sélectionne tes jeux dans <#🎯・choisir-ses-jeux> (Apex / Valorant).\n' +
-        `👉 Découvre nos formules de coaching et réserve sur le site !`
-      )
-      .setThumbnail(member.user.displayAvatarURL())
-      .setFooter({ text: 'Optimisation Esport & Biomécanique de l\'Aim' })
-      .setTimestamp();
+    try {
+      const avatarUrl = member.user.displayAvatarURL({ extension: 'png', size: 256 });
+      const cardBuffer = await generateWelcomeCard(avatarUrl, member.user.username, member.guild.name);
+      const attachment = new AttachmentBuilder(cardBuffer, { name: 'welcome-card.png' });
 
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setLabel('🌐 Découvrir le Site Web')
-        .setURL(SITE_URL)
-        .setStyle(ButtonStyle.Link)
-    );
+      const welcomeEmbed = new EmbedBuilder()
+        .setTitle('Ho ! Un nouveau membre !')
+        .setColor(0xe11d48)
+        .setDescription(`🎉 Bienvenue **${member.user.username}** 🎉 !\n\n👉 Va dans <#📜・règlement-et-accès> pour accepter le règlement et débloquer les salons.\n👉 Choisis tes jeux dans <#🎯・choisir-ses-jeux> !`)
+        .setImage('attachment://welcome-card.png')
+        .setTimestamp();
 
-    await bienvenueChannel.send({ content: `<@${member.id}>`, embeds: [welcomeEmbed], components: [row] });
+      await bienvenueChannel.send({
+        content: `<@${member.id}>`,
+        embeds: [welcomeEmbed],
+        files: [attachment]
+      });
+    } catch (err) {
+      console.error('Erreur envoi carte de bienvenue:', err);
+    }
   }
 });
 
