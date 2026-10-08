@@ -289,8 +289,14 @@ async function broadcastBookingAlert(booking) {
     );
     if (alertChannel && alertChannel.isTextBased()) {
       try {
-        await alertChannel.send({ embeds: [embed], components: [row] });
-        console.log(`✅ Alerte de réservation postée dans ${guild.name} -> #${alertChannel.name}`);
+        const coachRole = guild.roles.cache.find(r => r.name === '👑・Coach Poulpy');
+        const pingMention = coachRole ? `<@&${coachRole.id}>` : (guild.ownerId ? `<@${guild.ownerId}>` : '');
+        await alertChannel.send({
+          content: `${pingMention} 🚨 **Nouvelle réservation de coaching !**`,
+          embeds: [embed],
+          components: [row]
+        });
+        console.log(`✅ Alerte de réservation avec ping Coach postée dans ${guild.name} -> #${alertChannel.name}`);
       } catch (err) {
         console.error(`Impossible d'envoyer dans ${guild.name} :`, err);
       }
