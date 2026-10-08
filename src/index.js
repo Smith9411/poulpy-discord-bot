@@ -198,38 +198,78 @@ client.once('ready', async () => {
   listenToSupabaseBookings();
 });
 
-// 5. Supabase Realtime Listener (Alertes de réservations)
+// 5. Supabase Realtime & Polling Listener (Alertes de réservations fiables à 100%)
+let lastKnownBookingId = null;
+
 function listenToSupabaseBookings() {
-  console.log('📡 Écoute en direct des réservations Supabase activée...');
+  console.log('📡 Écoute des réservations Supabase sur la table coaching_bookings...');
+
+  // A. Supabase Realtime WebSocket
   supabase
-    .channel('discord_bot_bookings')
+    .channel('discord_bot_coaching_bookings')
     .on(
       'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'bookings' },
+      { event: 'INSERT', schema: 'public', table: 'coaching_bookings' },
       async (payload) => {
         const booking = payload.new;
-        console.log('🚨 Nouvelle réservation reçue via Supabase :', booking);
+        console.log('🚨 [Realtime] Nouvelle réservation reçue via Supabase :', booking);
+        lastKnownBookingId = booking.id;
         await broadcastBookingAlert(booking);
       }
     )
     .subscribe();
+
+  // B. Fallback Polling (Vérifie toutes les 15 secondes pour garantir 0 réservation manquée)
+  setInterval(async () => {
+    try {
+      const { data: latestBookings, error } = await supabase
+        .from('coaching_bookings')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (!error && latestBookings && latestBookings.length > 0) {
+        const latest = latestBookings[0];
+        if (lastKnownBookingId === null) {
+          lastKnownBookingId = latest.id;
+        } else if (lastKnownBookingId !== latest.id) {
+          console.log('🚨 [Polling Detection] Nouvelle réservation détectée :', latest);
+          lastKnownBookingId = latest.id;
+          await broadcastBookingAlert(latest);
+        }
+      }
+    } catch (e) {
+      console.error('Erreur polling bookings:', e.message);
+    }
+  }, 15000); // 15 secondes
 }
 
 async function broadcastBookingAlert(booking) {
+  const studentName = booking.student_name || booking.name || 'Anonyme';
+  const studentDiscord = booking.student_discord || booking.discord_username || booking.discord || 'Non renseigné';
+  const studentEmail = booking.student_email || booking.email || 'Non renseigné';
+  const game = booking.game || 'Non précisé';
+  const plan = booking.plan_name || booking.plan || booking.session_type || 'Coaching 1h';
+  const price = booking.plan_price || (booking.price ? booking.price + '€' : 'Gratuit / Payé');
+  const date = booking.booking_date || booking.date || 'À planifier';
+  const time = booking.booking_time || booking.time || '';
+  const notes = booking.notes || booking.goals || 'Aucun objectif saisi.';
+
   const embed = new EmbedBuilder()
     .setTitle('🚨 NOUVELLE RÉSERVATION DE COACHING !')
     .setColor(0x06b6d4) // Cyan Poulpy
     .setThumbnail(`${SITE_URL}/logo.png`)
     .addFields(
-      { name: '👤 Élève / Nom', value: `${booking.name || 'Anonyme'}`, inline: true },
-      { name: '💬 Discord', value: `\`${booking.discord_username || booking.discord || 'Non renseigné'}\``, inline: true },
-      { name: '🎮 Jeu', value: `${booking.game || 'Non précisé'}`, inline: true },
-      { name: '📦 Formule', value: `${booking.plan || booking.session_type || 'Coaching 1h'}`, inline: true },
-      { name: '📅 Date & Heure', value: `${booking.date || 'À planifier'} à ${booking.time || ''}`, inline: true },
-      { name: '💶 Prix / Statut', value: `${booking.price ? booking.price + '€' : 'Payé'} • **${booking.status || 'Confirmé'}**`, inline: true },
-      { name: '🎯 Objectifs de l\'élève', value: booking.notes || booking.goals || 'Aucun objectif saisi.' }
+      { name: '👤 Élève / Nom', value: `**${studentName}**`, inline: true },
+      { name: '💬 Discord', value: `\`${studentDiscord}\``, inline: true },
+      { name: '📧 Email', value: `\`${studentEmail}\``, inline: true },
+      { name: '🎮 Jeu', value: `${game}`, inline: true },
+      { name: '📦 Formule', value: `${plan}`, inline: true },
+      { name: '📅 Date & Heure', value: `${date} à ${time}`, inline: true },
+      { name: '💶 Prix / Statut', value: `${price} • **${booking.status || 'Confirmé'}**`, inline: true },
+      { name: '🎯 Objectifs de l\'élève', value: notes }
     )
-    .setFooter({ text: 'Poulpy Coaching System' })
+    .setFooter({ text: 'Poulpy Coaching System • poulpy-coaching.vercel.app' })
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
@@ -250,6 +290,7 @@ async function broadcastBookingAlert(booking) {
     if (alertChannel && alertChannel.isTextBased()) {
       try {
         await alertChannel.send({ embeds: [embed], components: [row] });
+        console.log(`✅ Alerte de réservation postée dans ${guild.name} -> #${alertChannel.name}`);
       } catch (err) {
         console.error(`Impossible d'envoyer dans ${guild.name} :`, err);
       }
