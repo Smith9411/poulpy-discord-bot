@@ -46,6 +46,11 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.GuildMember]
 });
 
+// Gestionnaire d'erreurs global (Empêche tout crash)
+client.on('error', (err) => console.error('⚠️ Discord Client Error:', err.message));
+process.on('unhandledRejection', (reason) => console.error('⚠️ Unhandled Rejection:', reason));
+process.on('uncaughtException', (err) => console.error('⚠️ Uncaught Exception:', err));
+
 // Map pour suivre les salons vocaux temporaires créés
 const tempVoiceChannels = new Set();
 
