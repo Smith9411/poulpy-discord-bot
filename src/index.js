@@ -1160,9 +1160,8 @@ async function applyServerPermissions(guild) {
   for (const [, channel] of channels) {
     if (!channel) continue;
 
-    // 1. Catégorie & Salons ACCUEIL & INFOS
-    // Règle : @everyone peut voir et lire les messages et cliquer sur les boutons, mais NE PEUT PAS écrire
-    if (channel.name.includes('ACCUEIL') || ['👋・bienvenue', '📜・règlement-et-accès', '📢・annonces', '🔗・liens-utiles', '🎯・choisir-ses-jeux', '📩・contacter-poulpy'].includes(channel.name)) {
+    // 1. SALON RÈGLEMENT UNIQUE (Seul et unique salon visible par @everyone à l'arrivée)
+    if (channel.name === '📜・règlement-et-accès') {
       await channel.permissionOverwrites.edit(everyone, {
         ViewChannel: true,
         ReadMessageHistory: true,
@@ -1171,6 +1170,42 @@ async function applyServerPermissions(guild) {
         CreatePublicThreads: false,
         CreatePrivateThreads: false
       }).catch(() => {});
+
+      if (membreRole) {
+        await channel.permissionOverwrites.edit(membreRole, {
+          ViewChannel: true,
+          ReadMessageHistory: true,
+          SendMessages: false,
+          AddReactions: false
+        }).catch(() => {});
+      }
+
+      if (coachRole) {
+        await channel.permissionOverwrites.edit(coachRole, {
+          ViewChannel: true,
+          SendMessages: true,
+          ManageMessages: true,
+          EmbedLinks: true,
+          AttachFiles: true
+        }).catch(() => {});
+      }
+    }
+
+    // 2. CATÉGORIE ACCUEIL & AUTRES SALONS D'ACCUEIL (Bienvenue, Annonces, Rôles, etc.)
+    // Masqués pour @everyone, débloqués UNIQUEMENT dès que le rôle ⭐・Membre Vérifié est obtenu
+    else if (channel.name.includes('ACCUEIL') || ['👋・bienvenue', '📢・annonces', '🔗・liens-utiles', '🎯・choisir-ses-jeux', '📩・contacter-poulpy'].includes(channel.name)) {
+      await channel.permissionOverwrites.edit(everyone, {
+        ViewChannel: false // ❌ Bloqué tant que pas vérifié
+      }).catch(() => {});
+
+      if (membreRole) {
+        await channel.permissionOverwrites.edit(membreRole, {
+          ViewChannel: true, // ✅ Débloqué après validation du règlement
+          ReadMessageHistory: true,
+          SendMessages: false,
+          AddReactions: false
+        }).catch(() => {});
+      }
 
       if (coachRole) {
         await channel.permissionOverwrites.edit(coachRole, {
