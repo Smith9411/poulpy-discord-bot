@@ -230,10 +230,183 @@ async function registerCommands() {
 // 4. Événement Ready
 client.once('ready', async () => {
   console.log(`🤖 Bot connecté en tant que ${client.user.tag} !`);
-  client.user.setActivity('poulpy-coaching.vercel.app', { type: 3 }); // Watching
+  client.user.setActivity('www.poulpy-coaching.fr', { type: 3 }); // Watching
   await registerCommands();
   listenToSupabaseBookings();
+  listenToSupabaseCoachingStatus();
 });
+
+// --- SYSTÈME DE RÔLE DYNAMIQUE "⚡・EN COACHING" ---
+async function ensureCoachingRoles(guild) {
+  try {
+    let enCoachingRole = guild.roles.cache.find(r => r.name === '⚡・En Coaching' || r.name === 'En Coaching');
+    let eleveRole = guild.roles.cache.find(r => r.name === '🎓・Élève Poulpy');
+
+    if (!enCoachingRole) {
+      enCoachingRole = await guild.roles.create({
+        name: '⚡・En Coaching',
+        color: 0x00b4a0, // Vert d'eau dynamique / cyber Poulpy
+        hoist: true,
+        mentionable: true,
+        reason: 'Rôle dynamique En Coaching lié au panel du site',
+      });
+      console.log(`✅ Rôle "⚡・En Coaching" créé dans ${guild.name}`);
+    }
+
+    // Positionner "⚡・En Coaching" au-dessus d'Élève Poulpy
+    if (enCoachingRole && eleveRole && enCoachingRole.position <= eleveRole.position) {
+      try {
+        await enCoachingRole.setPosition(eleveRole.position + 1);
+        console.log(`🔝 Rôle "⚡・En Coaching" positionné au-dessus de "${eleveRole.name}"`);
+      } catch (posErr) {
+        // Ignoré si la hiérarchie du rôle du bot est inférieure
+      }
+    }
+
+    return { enCoachingRole, eleveRole };
+  } catch (err) {
+    console.error('Erreur ensureCoachingRoles:', err.message);
+    return {};
+  }
+}
+
+async function findDiscordMemberForUser(guild, userId) {
+  try {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('id, username, discord')
+      .eq('id', userId)
+      .maybeSingle();
+
+    const { data: latestBooking } = await supabase
+      .from('coaching_bookings')
+      .select('student_discord')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let oauthDiscordId = null;
+    try {
+      if (supabase.auth?.admin) {
+        const { data: authUser } = await supabase.auth.admin.getUserById(userId);
+        const discordIdentity = authUser?.user?.identities?.find(i => i.provider === 'discord');
+        if (discordIdentity?.id) {
+          oauthDiscordId = discordIdentity.id;
+        }
+      }
+    } catch (_) {}
+
+    const cleanDiscord = (latestBooking?.student_discord || profile?.discord || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^@/, '');
+    const cleanUsername = (profile?.username || '').trim().toLowerCase();
+
+    const members = await guild.members.fetch();
+    const member = members.find(m => {
+      if (oauthDiscordId && m.id === oauthDiscordId) return true;
+      if (cleanDiscord && (
+        m.id === cleanDiscord ||
+        m.user.username.toLowerCase() === cleanDiscord ||
+        m.user.tag.toLowerCase() === cleanDiscord ||
+        m.displayName.toLowerCase() === cleanDiscord
+      )) return true;
+      if (cleanUsername && (
+        m.user.username.toLowerCase() === cleanUsername ||
+        m.displayName.toLowerCase() === cleanUsername
+      )) return true;
+      return false;
+    });
+
+    return member || null;
+  } catch (err) {
+    console.error('Erreur findDiscordMemberForUser:', err.message);
+    return null;
+  }
+}
+
+async function syncUserCoachingRole(guild, userId, inCoaching) {
+  try {
+    const { enCoachingRole, eleveRole } = await ensureCoachingRoles(guild);
+    if (!enCoachingRole) return;
+
+    const member = await findDiscordMemberForUser(guild, userId);
+    if (!member) return;
+
+    if (inCoaching) {
+      // 1. Ajouter "⚡・En Coaching"
+      if (!member.roles.cache.has(enCoachingRole.id)) {
+        await member.roles.add(enCoachingRole);
+        console.log(`✅ [Coaching Sync] Rôle "⚡・En Coaching" attribué à ${member.user.tag} (En coaching actif sur le site)`);
+      }
+      // 2. S'assurer qu'il a AUSSI "🎓・Élève Poulpy" (ne disparaît jamais !)
+      if (eleveRole && !member.roles.cache.has(eleveRole.id)) {
+        await member.roles.add(eleveRole);
+        console.log(`✅ [Coaching Sync] Rôle "🎓・Élève Poulpy" garanti pour ${member.user.tag}`);
+      }
+    } else {
+      // 3. Retirer UNIQUEMENT "⚡・En Coaching"
+      if (member.roles.cache.has(enCoachingRole.id)) {
+        await member.roles.remove(enCoachingRole);
+        console.log(`🔻 [Coaching Sync] Rôle "⚡・En Coaching" retiré à ${member.user.tag} (Coaching inactif / terminé sur le site)`);
+      }
+      // Note : "🎓・Élève Poulpy" n'est JAMAIS retiré ici !
+    }
+  } catch (err) {
+    console.error(`[Coaching Sync] Erreur pour user ${userId}:`, err.message);
+  }
+}
+
+async function syncAllCoachingRoles(guild) {
+  try {
+    const { enCoachingRole } = await ensureCoachingRoles(guild);
+    if (!enCoachingRole) return;
+
+    const { data: profiles, error } = await supabase
+      .from('profiles')
+      .select('id, in_coaching');
+
+    if (error || !profiles) return;
+
+    for (const p of profiles) {
+      await syncUserCoachingRole(guild, p.id, Boolean(p.in_coaching));
+    }
+  } catch (err) {
+    console.error('Erreur syncAllCoachingRoles:', err.message);
+  }
+}
+
+function listenToSupabaseCoachingStatus() {
+  console.log('📡 Écoute en temps réel du statut "in_coaching" sur profiles...');
+
+  // Écoute Realtime sur la table profiles
+  supabase
+    .channel('discord_bot_profiles_in_coaching')
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'profiles' },
+      async (payload) => {
+        const oldVal = Boolean(payload.old?.in_coaching);
+        const newVal = Boolean(payload.new?.in_coaching);
+
+        if (oldVal !== newVal) {
+          console.log(`⚡ [Realtime] Statut coaching modifié pour user ${payload.new.id} : in_coaching = ${newVal}`);
+          for (const guild of client.guilds.cache.values()) {
+            await syncUserCoachingRole(guild, payload.new.id, newVal);
+          }
+        }
+      }
+    )
+    .subscribe();
+
+  // Polling de sécurité toutes les 45 secondes pour synchronisation infaillible
+  setInterval(async () => {
+    for (const guild of client.guilds.cache.values()) {
+      await syncAllCoachingRoles(guild);
+    }
+  }, 45 * 1000);
+}
 
 // 5. Supabase Realtime & Polling Listener (Alertes de réservations fiables à 100%)
 let lastKnownBookingId = null;
@@ -459,10 +632,13 @@ async function broadcastBookingAlert(booking) {
         if (studentMember) {
           console.log(`👤 Élève trouvé sur Discord : ${studentMember.user.tag} (Serveur : ${guild.name})`);
 
-          // Attribution automatique du rôle Élève Poulpy
-          const eleveRole = guild.roles.cache.find(r => r.name === '🎓・Élève Poulpy');
+          // Attribution automatique du rôle Élève Poulpy et du rôle En Coaching
+          const { enCoachingRole, eleveRole } = await ensureCoachingRoles(guild);
           if (eleveRole && !studentMember.roles.cache.has(eleveRole.id)) {
             await studentMember.roles.add(eleveRole).catch(e => console.log('Erreur ajout rôle élève:', e.message));
+          }
+          if (enCoachingRole && !studentMember.roles.cache.has(enCoachingRole.id)) {
+            await studentMember.roles.add(enCoachingRole).catch(e => console.log('Erreur ajout rôle En Coaching:', e.message));
           }
 
           // Message Privé de Confirmation
@@ -526,6 +702,7 @@ client.on('interactionCreate', async (interaction) => {
         const rolesToCreate = [
           { name: '👑・Coach Poulpy', color: 0x06b6d4, hoist: true, mentionable: true, permissions: [PermissionsBitField.Flags.Administrator] },
           { name: '🛡️・Admin', color: 0xe11d48, hoist: true, mentionable: true, permissions: [PermissionsBitField.Flags.Administrator] },
+          { name: '⚡・En Coaching', color: 0x00b4a0, hoist: true, mentionable: true },
           { name: '🎓・Élève Poulpy', color: 0x3b82f6, hoist: true, mentionable: true },
           { name: '⭐・Membre Vérifié', color: 0x10b981, hoist: true, mentionable: false },
           { name: '🔴・Apex Legends', color: 0xef4444, hoist: false, mentionable: true },
@@ -548,8 +725,15 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         const coachRole = createdRoles['👑・Coach Poulpy'];
+        const enCoachingRole = createdRoles['⚡・En Coaching'];
         const eleveRole = createdRoles['🎓・Élève Poulpy'];
         const membreRole = createdRoles['⭐・Membre Vérifié'];
+
+        if (enCoachingRole && eleveRole && enCoachingRole.position <= eleveRole.position) {
+          try {
+            await enCoachingRole.setPosition(eleveRole.position + 1);
+          } catch (_) {}
+        }
 
         await interaction.editReply('📁 **2/4 - Création des catégories et salons...**');
 
@@ -1419,10 +1603,13 @@ client.on('guildMemberAdd', async (member) => {
       if (match) {
         console.log(`🎓 Nouveau membre avec réservation existante détecté : ${member.user.tag}`);
 
-        // Attribuer le rôle Élève
-        const eleveRole = member.guild.roles.cache.find(r => r.name === '🎓・Élève Poulpy');
+        // Attribuer le rôle Élève + rôle En Coaching
+        const { enCoachingRole, eleveRole } = await ensureCoachingRoles(member.guild);
         if (eleveRole && !member.roles.cache.has(eleveRole.id)) {
           await member.roles.add(eleveRole).catch(console.error);
+        }
+        if (enCoachingRole && !member.roles.cache.has(enCoachingRole.id)) {
+          await member.roles.add(enCoachingRole).catch(console.error);
         }
 
         // Envoyer le MP de récapitulatif
