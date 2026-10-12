@@ -16,7 +16,7 @@ const {
 const { createClient } = require('@supabase/supabase-js');
 const http = require('http');
 
-const SITE_URL = process.env.SITE_URL || 'https://poulpy-coaching.vercel.app';
+const SITE_URL = process.env.SITE_URL || 'https://www.poulpy-coaching.fr';
 const RENDER_URL = process.env.RENDER_URL || 'https://poulpy-discord-bot.onrender.com';
 const PORT = process.env.PORT || 3000;
 
@@ -1453,6 +1453,146 @@ client.on('guildMemberAdd', async (member) => {
     }
   } catch (err) {
     console.error('Erreur vérification réservation nouveau membre:', err);
+  }
+});
+
+// 9. Synchronisation Rôles Discord ↔ Statut "En Coaching" sur le site
+function isCoachingRole(roleName) {
+  if (!roleName) return false;
+  const n = roleName.toLowerCase();
+  return (
+    n.includes('élève poulpy') ||
+    n.includes('eleve poulpy') ||
+    n.includes('en coaching') ||
+    n.includes('élève') ||
+    n.includes('eleve') ||
+    n.includes('coaching actif')
+  );
+}
+
+async function findSupabaseUserForDiscordMember(member) {
+  try {
+    const discordId = member.id;
+    const username = member.user?.username?.toLowerCase();
+    const tag = member.user?.tag?.toLowerCase();
+    const displayName = member.displayName?.toLowerCase();
+
+    // 1. Recherche dans les profils Supabase
+    const { data: profiles, error: profErr } = await supabase
+      .from('profiles')
+      .select('id, username, discord, in_coaching');
+
+    if (!profErr && profiles && profiles.length > 0) {
+      const match = profiles.find(p => {
+        if (!p) return false;
+        const d = (p.discord || '').trim().toLowerCase().replace(/^@/, '');
+        const u = (p.username || '').trim().toLowerCase();
+        return (
+          d === discordId ||
+          (d && (d === username || d === tag)) ||
+          (u && (u === username || u === displayName))
+        );
+      });
+
+      if (match) return match.id;
+    }
+
+    // 2. Recherche dans les réservations (student_discord)
+    const { data: bookings } = await supabase
+      .from('coaching_bookings')
+      .select('user_id, student_discord')
+      .not('user_id', 'is', null)
+      .order('created_at', { ascending: false });
+
+    if (bookings && bookings.length > 0) {
+      const match = bookings.find(b => {
+        const d = (b.student_discord || '').trim().toLowerCase().replace(/^@/, '');
+        return d === discordId || d === username || d === tag;
+      });
+
+      if (match?.user_id) return match.user_id;
+    }
+
+    // 3. Recherche dans auth.users (Discord OAuth)
+    if (supabase.auth?.admin) {
+      const { data: authData } = await supabase.auth.admin.listUsers({ perPage: 1000 }).catch(() => ({ data: null }));
+      if (authData?.users) {
+        const match = authData.users.find(u => {
+          const discordIdentity = u.identities?.find(i => i.provider === 'discord');
+          if (discordIdentity && (discordIdentity.id === discordId || discordIdentity.identity_data?.id === discordId)) {
+            return true;
+          }
+          const metaDiscord = (u.user_metadata?.discord || u.user_metadata?.custom_claims?.global_name || '').trim().toLowerCase().replace(/^@/, '');
+          return metaDiscord === discordId || metaDiscord === username || metaDiscord === tag;
+        });
+
+        if (match) return match.id;
+      }
+    }
+  } catch (err) {
+    console.error('[Role Sync] Erreur recherche utilisateur Supabase:', err.message);
+  }
+
+  return null;
+}
+
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  try {
+    const oldRoles = oldMember.roles.cache;
+    const newRoles = newMember.roles.cache;
+
+    // Détection si un rôle lié au coaching a été retiré ou ajouté
+    const removedCoachingRole = oldRoles.find(r => isCoachingRole(r.name) && !newRoles.has(r.id));
+    const addedCoachingRole = newRoles.find(r => isCoachingRole(r.name) && !oldRoles.has(r.id));
+
+    if (!removedCoachingRole && !addedCoachingRole) return;
+
+    const targetUserId = await findSupabaseUserForDiscordMember(newMember);
+    const memberHandle = newMember.user?.tag || newMember.user?.username || newMember.id;
+
+    if (removedCoachingRole) {
+      console.log(`🔻 [Role Sync] Rôle "${removedCoachingRole.name}" retiré à ${memberHandle}`);
+
+      if (targetUserId) {
+        const { error } = await supabase
+          .from('profiles')
+          .update({ in_coaching: false })
+          .eq('id', targetUserId);
+
+        if (error) {
+          console.error('[Role Sync] Erreur désactivation in_coaching:', error.message);
+        } else {
+          console.log(`✅ [Role Sync] Statut "En Coaching" retiré sur le site pour l'utilisateur ID: ${targetUserId}`);
+        }
+      } else {
+        // Fallback si ID introuvable directement
+        const cleanName = newMember.user?.username?.toLowerCase();
+        if (cleanName) {
+          await supabase
+            .from('profiles')
+            .update({ in_coaching: false })
+            .ilike('discord', `%${cleanName}%`);
+          console.log(`⚠️ [Role Sync] Mise à jour de repli appliquée pour discord: ${cleanName}`);
+        }
+      }
+    } else if (addedCoachingRole) {
+      console.log(`🔺 [Role Sync] Rôle "${addedCoachingRole.name}" attribué à ${memberHandle}`);
+
+      if (targetUserId) {
+        const { error } = await supabase
+          .from('profiles')
+          .update({ in_coaching: true })
+          .eq('id', targetUserId);
+
+        if (error) {
+          console.error('[Role Sync] Erreur activation in_coaching:', error.message);
+        } else {
+          console.log(`✅ [Role Sync] Statut "En Coaching" activé sur le site pour l'utilisateur ID: ${targetUserId}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Role Sync] Erreur lors de la mise à jour des rôles:', err);
   }
 });
 
