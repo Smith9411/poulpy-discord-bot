@@ -274,7 +274,7 @@ async function findDiscordMemberForUser(guild, userId) {
   try {
     const { data: profile } = await supabase
       .from('profiles')
-      .select('id, username, discord')
+      .select('id, username')
       .eq('id', userId)
       .maybeSingle();
 
@@ -287,6 +287,7 @@ async function findDiscordMemberForUser(guild, userId) {
       .maybeSingle();
 
     let oauthDiscordId = null;
+    let metaDiscord = null;
     try {
       if (supabase.auth?.admin) {
         const { data: authUser } = await supabase.auth.admin.getUserById(userId);
@@ -294,10 +295,13 @@ async function findDiscordMemberForUser(guild, userId) {
         if (discordIdentity?.id) {
           oauthDiscordId = discordIdentity.id;
         }
+        if (authUser?.user?.user_metadata?.discord) {
+          metaDiscord = authUser.user.user_metadata.discord.toLowerCase().replace(/^@/, '');
+        }
       }
     } catch (_) {}
 
-    const cleanDiscord = (latestBooking?.student_discord || profile?.discord || '')
+    const cleanDiscord = (latestBooking?.student_discord || metaDiscord || '')
       .trim()
       .toLowerCase()
       .replace(/^@/, '');
