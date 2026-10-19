@@ -584,13 +584,15 @@ function listenToSupabaseCoachingStatus() {
 
 // 5. Supabase Realtime & Polling Listener (Alertes de réservations fiables à 100%)
 let lastKnownBookingId = null;
+let isBookingCacheSeeded = false;
+let isPollingBookings = false;
 
 async function seedBookingStateCache() {
   try {
     const { data: recentBookings } = await supabase
       .from('coaching_bookings')
       .select('id, status, booking_date, booking_time')
-      .order('created_at', { ascending: false })
+      .order('updated_at', { ascending: false })
       .limit(100);
 
     if (recentBookings && recentBookings.length > 0) {
@@ -603,14 +605,16 @@ async function seedBookingStateCache() {
         });
       }
     }
+    isBookingCacheSeeded = true;
   } catch (e) {
     console.error('Erreur seedBookingStateCache:', e.message);
+    isBookingCacheSeeded = true;
   }
 }
 
-function listenToSupabaseBookings() {
+async function listenToSupabaseBookings() {
   console.log('📡 Écoute des réservations Supabase sur la table coaching_bookings...');
-  seedBookingStateCache();
+  await seedBookingStateCache();
 
   // A. Supabase Realtime WebSocket (INSERT & UPDATE)
   supabase
@@ -673,39 +677,68 @@ function listenToSupabaseBookings() {
     )
     .subscribe();
 
-  // B. Fallback Polling (Vérifie toutes les 20 secondes pour garantir 0 réservation manquée)
+  // B. Fallback Polling (Vérifie toutes les 10 secondes les créations ET les mises à jour : annulations & reports)
   setInterval(async () => {
+    if (!isBookingCacheSeeded || isPollingBookings) return;
+    isPollingBookings = true;
     try {
-      const { data: latestBookings, error } = await supabase
+      const { data: recentBookings, error } = await supabase
         .from('coaching_bookings')
         .select('*')
-        .order('created_at', { ascending: false })
-        .limit(1);
+        .order('updated_at', { ascending: false })
+        .limit(25);
 
-      if (!error && latestBookings && latestBookings.length > 0) {
-        const latest = latestBookings[0];
-        if (lastKnownBookingId === null) {
-          lastKnownBookingId = latest.id;
-          bookingStateCache.set(latest.id, {
-            status: latest.status,
-            booking_date: latest.booking_date,
-            booking_time: latest.booking_time,
-          });
-        } else if (lastKnownBookingId !== latest.id && !bookingStateCache.has(latest.id)) {
-          console.log('🚨 [Polling Detection] Nouvelle réservation détectée :', latest.id);
-          lastKnownBookingId = latest.id;
-          bookingStateCache.set(latest.id, {
-            status: latest.status,
-            booking_date: latest.booking_date,
-            booking_time: latest.booking_time,
-          });
-          await broadcastBookingAlert(latest);
+      if (!error && recentBookings && recentBookings.length > 0) {
+        // Parcourir du plus ancien au plus récent parmi les dernières modifications
+        const ordered = [...recentBookings].reverse();
+        for (const b of ordered) {
+          if (!bookingStateCache.has(b.id)) {
+            bookingStateCache.set(b.id, {
+              status: b.status,
+              booking_date: b.booking_date,
+              booking_time: b.booking_time,
+            });
+            lastKnownBookingId = b.id;
+
+            const isCancelled = b.status === 'cancelled' || b.status === 'annulé';
+            if (isCancelled) {
+              console.log('🔴 [Polling Detection] Réservation créée puis annulée détectée :', b.id);
+              await broadcastBookingUpdate({ status: 'confirmed', booking_date: b.booking_date, booking_time: b.booking_time }, b);
+            } else {
+              console.log('🚨 [Polling Detection] Nouvelle réservation détectée :', b.id);
+              await broadcastBookingAlert(b);
+            }
+          } else {
+            const prev = bookingStateCache.get(b.id);
+            const isNowCancelled = b.status === 'cancelled' || b.status === 'annulé';
+            const wasCancelled = prev.status === 'cancelled' || prev.status === 'annulé';
+            const justCancelled = isNowCancelled && !wasCancelled;
+
+            const dateChanged = Boolean(
+              (prev.booking_date && prev.booking_date !== b.booking_date) ||
+              (prev.booking_time && prev.booking_time !== b.booking_time)
+            );
+            const justRescheduled = !isNowCancelled && b.status !== 'completed' && dateChanged;
+
+            bookingStateCache.set(b.id, {
+              status: b.status,
+              booking_date: b.booking_date,
+              booking_time: b.booking_time,
+            });
+
+            if (justCancelled || justRescheduled) {
+              console.log(`🔄 [Polling Detection] Réservation ${justCancelled ? 'annulée' : 'déplacée'} (${b.id})`);
+              await broadcastBookingUpdate(prev, b);
+            }
+          }
         }
       }
     } catch (e) {
       console.error('Erreur polling bookings:', e.message);
+    } finally {
+      isPollingBookings = false;
     }
-  }, 20000);
+  }, 10000);
 }
 
 // Extraction du Riot ID / Pseudo Apex depuis la réservation ou le profil Supabase
@@ -730,6 +763,19 @@ async function resolveBookingRiotId(booking) {
   return null;
 }
 
+function extractCleanCancelReason(adminNotes) {
+  if (!adminNotes || typeof adminNotes !== 'string') return '';
+  return adminNotes
+    .replace(/\[riot_id:[^\]]+\]/gi, '')
+    .replace(/\[stripe_session:[^\]]+\]/gi, '')
+    .replace(/\[reminder_2h_sent\]/gi, '')
+    .replace(/\[reminder_email_id:[^\]]+\]/gi, '')
+    .replace(/Paiement Stripe validé \([^)]*\)/gi, '')
+    .replace(/Séance gratuite validée automatiquement/gi, '')
+    .replace(/Annulée par le coach depuis le panneau admin\.?/gi, '')
+    .trim();
+}
+
 // Gestion des mises à jour / déplacements / annulations
 async function broadcastBookingUpdate(oldBooking, newBooking) {
   const studentName = newBooking.student_name || 'Élève';
@@ -740,6 +786,7 @@ async function broadcastBookingUpdate(oldBooking, newBooking) {
   const date = newBooking.booking_date || '';
   const time = newBooking.booking_time || '';
   const status = newBooking.status;
+  const cancelReason = extractCleanCancelReason(newBooking.admin_notes);
 
   const isCancelled = status === 'cancelled' || status === 'annulé';
   const isRescheduled = Boolean(
@@ -762,6 +809,10 @@ async function broadcastBookingUpdate(oldBooking, newBooking) {
     )
     .setFooter({ text: 'Poulpy Coaching System • www.poulpy-coaching.fr' })
     .setTimestamp();
+
+  if (isCancelled && cancelReason) {
+    embed.addFields({ name: '📝 Motif d\'annulation', value: cancelReason });
+  }
 
   if (isRescheduled && oldBooking?.booking_date) {
     embed.addFields({ name: '⏱️ Ancien créneau', value: `${oldBooking.booking_date} à ${oldBooking.booking_time || ''}` });
@@ -796,13 +847,14 @@ async function broadcastBookingUpdate(oldBooking, newBooking) {
     try {
       const studentMember = await findDiscordMemberForUser(guild, newBooking.user_id, studentDiscord);
       if (studentMember) {
+        const reasonBlock = isCancelled && cancelReason ? `\n📝 **Motif :** ${cancelReason}\n` : '';
         const studentEmbed = new EmbedBuilder()
           .setTitle(isCancelled ? '🔴 ANNULATION DE TA SÉANCE • POULPY COACHING' : '🟡 NOUVEL HORAIRE DE SÉANCE • POULPY COACHING')
           .setColor(isCancelled ? 0xef4444 : 0xeab308)
           .setThumbnail(LOGO_URL)
           .setDescription(
             isCancelled
-              ? `Bonjour **${studentName}**,\n\nTa séance de coaching prévue le **${date} à ${time}** a été **annulée**.\nPour reprendre un créneau : [Accéder au site](${SITE_URL}/#booking)`
+              ? `Bonjour **${studentName}**,\n\nTa séance de coaching prévue le **${date} à ${time}** a été **annulée**.${reasonBlock}\nPour reprendre un créneau : [Accéder au site](${SITE_URL}/#booking)`
               : `Bonjour **${studentName}** ! 🎉\n\nTa séance de coaching a été reprogrammée :\n\n📅 **Nouveau créneau : ${date} à ${time}**\n🎮 **Jeu : ${game}**\n\nÀ très vite sur le vocal !`
           )
           .setTimestamp();
@@ -814,7 +866,10 @@ async function broadcastBookingUpdate(oldBooking, newBooking) {
             .setStyle(ButtonStyle.Link)
         );
 
-        await studentMember.send({ embeds: [studentEmbed], components: [studentRow] }).catch(() => {});
+        await studentMember.send({ embeds: [studentEmbed], components: [studentRow] }).catch(err => {
+          console.warn(`Impossible d'envoyer le MP d'update à ${studentMember.user.tag} :`, err.message);
+        });
+        console.log(`✉️ MP de ${isCancelled ? 'annulation' : 'report'} envoyé à l'élève : ${studentMember.user.tag}`);
       }
     } catch (e) {
       console.error('Erreur MP student update:', e.message);
