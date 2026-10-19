@@ -708,10 +708,33 @@ function listenToSupabaseBookings() {
   }, 20000);
 }
 
+// Extraction du Riot ID / Pseudo Apex depuis la réservation ou le profil Supabase
+async function resolveBookingRiotId(booking) {
+  if (!booking) return null;
+  if (typeof booking.riot_id === 'string' && booking.riot_id.trim()) {
+    return booking.riot_id.trim();
+  }
+  if (typeof booking.admin_notes === 'string') {
+    const m = booking.admin_notes.match(/\[riot_id:([^\]]+)\]/i);
+    if (m && m[1]?.trim()) return m[1].trim();
+  }
+  if (booking.user_id && supabase.auth?.admin) {
+    try {
+      const { data } = await supabase.auth.admin.getUserById(booking.user_id);
+      const rId = data?.user?.user_metadata?.riot_id || data?.user?.user_metadata?.riotId;
+      if (typeof rId === 'string' && rId.trim()) return rId.trim();
+    } catch {
+      // Ignore
+    }
+  }
+  return null;
+}
+
 // Gestion des mises à jour / déplacements / annulations
 async function broadcastBookingUpdate(oldBooking, newBooking) {
   const studentName = newBooking.student_name || 'Élève';
   const studentDiscord = newBooking.student_discord || '';
+  const riotId = (await resolveBookingRiotId(newBooking)) || 'Non renseigné';
   const game = newBooking.game || 'Valorant';
   const plan = newBooking.plan_name || 'Coaching';
   const date = newBooking.booking_date || '';
@@ -732,6 +755,7 @@ async function broadcastBookingUpdate(oldBooking, newBooking) {
     .setThumbnail(LOGO_URL)
     .addFields(
       { name: '👤 Élève', value: `**${studentName}** (\`${studentDiscord}\`)`, inline: true },
+      { name: '🎯 Riot ID / Pseudo Jeu', value: `\`${riotId}\``, inline: true },
       { name: '🎮 Jeu & Formule', value: `${game} • ${plan}`, inline: true },
       { name: '📅 Date & Heure', value: `**${date}** à **${time}**`, inline: true },
       { name: '📊 Nouveau Statut', value: `**${isCancelled ? 'Annulée' : 'Reportée'}**`, inline: true }
@@ -802,6 +826,7 @@ async function broadcastBookingAlert(booking) {
   const studentName = booking.student_name || booking.name || 'Anonyme';
   const studentDiscord = booking.student_discord || booking.discord_username || booking.discord || 'Non renseigné';
   const studentEmail = booking.student_email || booking.email || 'Non renseigné';
+  const riotId = (await resolveBookingRiotId(booking)) || 'Non renseigné';
   const game = booking.game || 'Non précisé';
   const plan = booking.plan_name || booking.plan || booking.session_type || 'Coaching 1h';
   const price = booking.plan_price || (booking.price ? booking.price + '€' : 'Gratuit / Payé');
@@ -816,6 +841,7 @@ async function broadcastBookingAlert(booking) {
     .addFields(
       { name: '👤 Élève / Nom', value: `**${studentName}**`, inline: true },
       { name: '💬 Discord', value: `\`${studentDiscord}\``, inline: true },
+      { name: '🎯 Riot ID / Pseudo Jeu', value: `\`${riotId}\``, inline: true },
       { name: '📧 Email', value: `\`${studentEmail}\``, inline: true },
       { name: '🎮 Jeu', value: `${game}`, inline: true },
       { name: '📦 Formule', value: `${plan}`, inline: true },
@@ -881,6 +907,7 @@ async function broadcastBookingAlert(booking) {
           .addFields(
             { name: '📦 Formule', value: `**${plan}** (${price})`, inline: true },
             { name: '📅 Date & Heure', value: `**${date}** à **${time}**`, inline: true },
+            { name: '🎯 Pseudo en jeu', value: `\`${riotId}\``, inline: true },
             { name: '🎙️ Où se déroule le coaching ?', value: 'Sur le serveur Discord dans le salon vocal **`🎙️ Coaching 1-on-1`** (tu as désormais accès aux salons privés élèves).' },
             { name: '📝 Comment bien te préparer ?', value: '• Connecte-toi sur Discord 5 minutes avant l\'heure prévue.\n• Si tu as des VODs ou des questions, tu peux utiliser la commande `/vod` sur le serveur ou les partager dans le salon `#📁・partage-vod`.' }
           )
