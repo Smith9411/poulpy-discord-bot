@@ -16,8 +16,9 @@ const {
 const { createClient } = require('@supabase/supabase-js');
 const http = require('http');
 
-const SITE_URL = process.env.SITE_URL || 'https://poulpy-coaching.vercel.app';
-const RENDER_URL = process.env.RENDER_URL || 'https://poulpy-discord-bot.onrender.com';
+const SITE_URL = process.env.SITE_URL || 'https://www.poulpy-coaching.fr';
+const LOGO_URL = 'https://www.poulpy-coaching.fr/poulpy-octopus.png';
+const RENDER_URL = process.env.RENDER_URL || 'https://poulpy-bot-eu.onrender.com';
 const PORT = process.env.PORT || 3000;
 
 // Serveur Web pour Uptime / Diagnostic / Cloud Host
@@ -237,10 +238,136 @@ client.once('ready', async () => {
 });
 
 // --- SYSTÈME DE RÔLE DYNAMIQUE "⚡・EN COACHING" ---
+const guildMembersCache = new Map(); // guildId -> { fetchedAt, members }
+const profileCoachingCache = new Map(); // userId -> boolean
+const bookingStateCache = new Map(); // bookingId -> { status, booking_date, booking_time }
+let isSyncingRoles = false;
+
+async function getGuildMembersSafe(guild, forceRefresh = false) {
+  const cached = guildMembersCache.get(guild.id);
+  const now = Date.now();
+  if (!forceRefresh && cached && now - cached.fetchedAt < 10000 && cached.members?.size > 0) {
+    return cached.members;
+  }
+  try {
+    // Utilise l'API REST (guild.members.list) au lieu du WebSocket Opcode 8 (guild.members.fetch)
+    // pour éviter tout blocage/timeout "Members didn't arrive in time" !
+    const members = await guild.members.list({ limit: 1000 });
+    guildMembersCache.set(guild.id, { fetchedAt: now, members });
+    return members;
+  } catch (err) {
+    try {
+      const members = await guild.members.fetch({ time: 5000 });
+      guildMembersCache.set(guild.id, { fetchedAt: now, members });
+      return members;
+    } catch (_) {
+      return guild.members.cache;
+    }
+  }
+}
+
+function normalizeHandle(val) {
+  if (!val || typeof val !== 'string') return '';
+  return val.replace(/^@/, '').trim().toLowerCase();
+}
+
+function extractUserDiscordCandidates(profile, authUser, userBookings) {
+  const discordIds = new Set();
+  const handles = new Set();
+
+  const addCandidate = (raw) => {
+    const clean = normalizeHandle(raw);
+    if (!clean || clean === 'non renseigné' || clean === 'test') return;
+    if (/^\d{17,20}$/.test(clean)) {
+      discordIds.add(clean);
+    }
+    handles.add(clean);
+    if (clean.includes('#')) {
+      const beforeHash = clean.split('#')[0].trim();
+      if (beforeHash.length >= 2) handles.add(beforeHash);
+    }
+  };
+
+  if (authUser) {
+    const identities = Array.isArray(authUser.identities) ? authUser.identities : [];
+    for (const idObj of identities) {
+      if (idObj?.provider === 'discord') {
+        if (idObj.id && /^\d{17,20}$/.test(String(idObj.id))) discordIds.add(String(idObj.id));
+        if (idObj.provider_id && /^\d{17,20}$/.test(String(idObj.provider_id))) discordIds.add(String(idObj.provider_id));
+        if (idObj.identity_data?.sub && /^\d{17,20}$/.test(String(idObj.identity_data.sub))) discordIds.add(String(idObj.identity_data.sub));
+        addCandidate(idObj.identity_data?.full_name);
+        addCandidate(idObj.identity_data?.name);
+        addCandidate(idObj.identity_data?.custom_claims?.global_name);
+      }
+    }
+
+    const meta = authUser.user_metadata || {};
+    const isDiscordIssuer =
+      (typeof meta.iss === 'string' && meta.iss.includes('discord')) ||
+      (typeof meta.avatar_url === 'string' && meta.avatar_url.includes('discordapp.com'));
+
+    if (isDiscordIssuer) {
+      if (meta.provider_id && /^\d{17,20}$/.test(String(meta.provider_id))) discordIds.add(String(meta.provider_id));
+      if (meta.sub && /^\d{17,20}$/.test(String(meta.sub))) discordIds.add(String(meta.sub));
+      addCandidate(meta.full_name);
+      addCandidate(meta.name);
+      addCandidate(meta.custom_claims?.global_name);
+    }
+
+    addCandidate(meta.discord);
+    addCandidate(meta.username);
+  }
+
+  if (profile) {
+    addCandidate(profile.discord);
+    addCandidate(profile.username);
+  }
+
+  if (Array.isArray(userBookings)) {
+    for (const b of userBookings) {
+      addCandidate(b?.student_discord);
+    }
+  }
+
+  return { discordIds, handles };
+}
+
+function matchDiscordMember(members, { discordIds, handles }) {
+  if (!members) return null;
+
+  // 1. Priorité absolue : ID Discord exact (OAuth2 / Snowflake)
+  for (const id of discordIds) {
+    const byId = members.get(id) || members.find(m => m.id === id);
+    if (byId && !byId.user?.bot) return byId;
+  }
+
+  // 2. Correspondance par username / tag / globalName / displayName
+  for (const h of handles) {
+    if (!h) continue;
+    const found = members.find(m => {
+      if (m.user?.bot) return false;
+      const uName = (m.user.username || '').toLowerCase();
+      const gName = (m.user.globalName || '').toLowerCase();
+      const dName = (m.displayName || '').toLowerCase();
+      const uTag = (m.user.tag || '').toLowerCase();
+      return uName === h || gName === h || dName === h || uTag === h;
+    });
+    if (found) return found;
+  }
+
+  return null;
+}
+
 async function ensureCoachingRoles(guild) {
   try {
     let enCoachingRole = guild.roles.cache.find(r => r.name === '⚡・En Coaching' || r.name === 'En Coaching');
     let eleveRole = guild.roles.cache.find(r => r.name === '🎓・Élève Poulpy');
+
+    if (!enCoachingRole || !eleveRole) {
+      const roles = await guild.roles.fetch();
+      enCoachingRole = roles.find(r => r.name === '⚡・En Coaching' || r.name === 'En Coaching');
+      eleveRole = roles.find(r => r.name === '🎓・Élève Poulpy');
+    }
 
     if (!enCoachingRole) {
       enCoachingRole = await guild.roles.create({
@@ -270,153 +397,220 @@ async function ensureCoachingRoles(guild) {
   }
 }
 
-async function findDiscordMemberForUser(guild, userId) {
+async function findDiscordMemberForUser(guild, userId, fallbackDiscordHandle = '') {
   try {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('id, username')
-      .eq('id', userId)
-      .maybeSingle();
+    const members = await getGuildMembersSafe(guild);
+    const discordIds = new Set();
+    const handles = new Set();
 
-    const { data: latestBooking } = await supabase
-      .from('coaching_bookings')
-      .select('student_discord')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    let oauthDiscordId = null;
-    let metaDiscord = null;
-    try {
-      if (supabase.auth?.admin) {
-        const { data: authUser } = await supabase.auth.admin.getUserById(userId);
-        const discordIdentity = authUser?.user?.identities?.find(i => i.provider === 'discord');
-        if (discordIdentity?.id) {
-          oauthDiscordId = discordIdentity.id;
-        }
-        if (authUser?.user?.user_metadata?.discord) {
-          metaDiscord = authUser.user.user_metadata.discord.toLowerCase().replace(/^@/, '');
-        }
+    if (fallbackDiscordHandle) {
+      const clean = normalizeHandle(fallbackDiscordHandle);
+      if (clean && clean !== 'non renseigné') {
+        if (/^\d{17,20}$/.test(clean)) discordIds.add(clean);
+        handles.add(clean);
+        if (clean.includes('#')) handles.add(clean.split('#')[0].trim());
       }
-    } catch (_) {}
+    }
 
-    const cleanDiscord = (latestBooking?.student_discord || metaDiscord || '')
-      .trim()
-      .toLowerCase()
-      .replace(/^@/, '');
-    const cleanUsername = (profile?.username || '').trim().toLowerCase();
+    if (userId) {
+      const [profRes, authRes, bookingsRes] = await Promise.all([
+        supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
+        supabase.auth?.admin ? supabase.auth.admin.getUserById(userId).catch(() => ({ data: null })) : Promise.resolve({ data: null }),
+        supabase.from('coaching_bookings').select('student_discord').eq('user_id', userId).order('created_at', { ascending: false }).limit(5),
+      ]);
 
-    const members = await guild.members.fetch();
-    const member = members.find(m => {
-      if (oauthDiscordId && m.id === oauthDiscordId) return true;
-      if (cleanDiscord && (
-        m.id === cleanDiscord ||
-        m.user.username.toLowerCase() === cleanDiscord ||
-        m.user.tag.toLowerCase() === cleanDiscord ||
-        m.displayName.toLowerCase() === cleanDiscord
-      )) return true;
-      if (cleanUsername && (
-        m.user.username.toLowerCase() === cleanUsername ||
-        m.displayName.toLowerCase() === cleanUsername
-      )) return true;
-      return false;
-    });
+      const extracted = extractUserDiscordCandidates(
+        profRes?.data,
+        authRes?.data?.user,
+        bookingsRes?.data || []
+      );
+      for (const id of extracted.discordIds) discordIds.add(id);
+      for (const h of extracted.handles) handles.add(h);
+    }
 
-    return member || null;
+    return matchDiscordMember(members, { discordIds, handles });
   } catch (err) {
     console.error('Erreur findDiscordMemberForUser:', err.message);
     return null;
   }
 }
 
-async function syncUserCoachingRole(guild, userId, inCoaching) {
+let pendingSyncRoles = false;
+
+async function syncAllCoachingRoles(guild, forceRefresh = false) {
+  if (isSyncingRoles) {
+    pendingSyncRoles = true;
+    return;
+  }
+  isSyncingRoles = true;
+
   try {
     const { enCoachingRole, eleveRole } = await ensureCoachingRoles(guild);
     if (!enCoachingRole) return;
 
-    const member = await findDiscordMemberForUser(guild, userId);
-    if (!member) return;
+    const [profRes, authRes, bookingsRes, members] = await Promise.all([
+      supabase.from('profiles').select('*'),
+      supabase.auth?.admin ? supabase.auth.admin.listUsers({ perPage: 1000 }).catch(() => ({ data: { users: [] } })) : Promise.resolve({ data: { users: [] } }),
+      supabase.from('coaching_bookings').select('user_id, student_email, student_discord, status').order('created_at', { ascending: false }),
+      getGuildMembersSafe(guild, forceRefresh),
+    ]);
 
-    if (inCoaching) {
-      // 1. Ajouter "⚡・En Coaching"
-      if (!member.roles.cache.has(enCoachingRole.id)) {
-        await member.roles.add(enCoachingRole);
-        console.log(`✅ [Coaching Sync] Rôle "⚡・En Coaching" attribué à ${member.user.tag} (En coaching actif sur le site)`);
+    const profiles = profRes?.data || [];
+    const authUsers = authRes?.data?.users || [];
+    const bookings = bookingsRes?.data || [];
+
+    if (!profiles.length || !members || !members.size) return;
+
+    const authById = new Map(authUsers.map(u => [u.id, u]));
+    const bookingsByUserId = new Map();
+    const bookingsByEmail = new Map();
+
+    for (const b of bookings) {
+      if (b.user_id) {
+        if (!bookingsByUserId.has(b.user_id)) bookingsByUserId.set(b.user_id, []);
+        bookingsByUserId.get(b.user_id).push(b);
       }
-      // 2. S'assurer qu'il a AUSSI "🎓・Élève Poulpy" (ne disparaît jamais !)
-      if (eleveRole && !member.roles.cache.has(eleveRole.id)) {
-        await member.roles.add(eleveRole);
-        console.log(`✅ [Coaching Sync] Rôle "🎓・Élève Poulpy" garanti pour ${member.user.tag}`);
+      if (b.student_email) {
+        const em = b.student_email.trim().toLowerCase();
+        if (!bookingsByEmail.has(em)) bookingsByEmail.set(em, []);
+        bookingsByEmail.get(em).push(b);
       }
-    } else {
-      // 3. Retirer UNIQUEMENT "⚡・En Coaching"
-      if (member.roles.cache.has(enCoachingRole.id)) {
-        await member.roles.remove(enCoachingRole);
-        console.log(`🔻 [Coaching Sync] Rôle "⚡・En Coaching" retiré à ${member.user.tag} (Coaching inactif / terminé sur le site)`);
-      }
-      // Note : "🎓・Élève Poulpy" n'est JAMAIS retiré ici !
     }
-  } catch (err) {
-    console.error(`[Coaching Sync] Erreur pour user ${userId}:`, err.message);
-  }
-}
 
-async function syncAllCoachingRoles(guild) {
-  try {
-    const { enCoachingRole } = await ensureCoachingRoles(guild);
-    if (!enCoachingRole) return;
-
-    const { data: profiles, error } = await supabase
-      .from('profiles')
-      .select('id, in_coaching');
-
-    if (error || !profiles) return;
+    const activeCoachingMemberIds = new Set();
+    const eleveMemberIds = new Set();
 
     for (const p of profiles) {
-      await syncUserCoachingRole(guild, p.id, Boolean(p.in_coaching));
+      const inCoaching = Boolean(p.in_coaching);
+      profileCoachingCache.set(p.id, inCoaching);
+
+      const authUser = authById.get(p.id);
+      const email = authUser?.email?.trim().toLowerCase();
+      const userBookings = [
+        ...(bookingsByUserId.get(p.id) || []),
+        ...(email ? (bookingsByEmail.get(email) || []) : []),
+      ];
+
+      const candidates = extractUserDiscordCandidates(p, authUser, userBookings);
+      const member = matchDiscordMember(members, candidates);
+
+      if (member) {
+        if (inCoaching) {
+          activeCoachingMemberIds.add(member.id);
+          eleveMemberIds.add(member.id);
+        } else if (userBookings.some(b => b.status !== 'cancelled')) {
+          eleveMemberIds.add(member.id);
+        }
+      }
+    }
+
+    // Appliquer les rôles sur tous les membres du serveur Discord
+    for (const [, member] of members) {
+      if (member.user?.bot) continue;
+
+      const shouldHaveEnCoaching = activeCoachingMemberIds.has(member.id);
+      const hasEnCoaching = member.roles.cache.has(enCoachingRole.id);
+
+      if (shouldHaveEnCoaching && !hasEnCoaching) {
+        await member.roles.add(enCoachingRole).catch(e => console.error(`Erreur ajout En Coaching à ${member.user.tag}:`, e.message));
+        console.log(`✅ [Coaching Sync] Rôle "⚡・En Coaching" attribué à ${member.user.tag}`);
+      } else if (!shouldHaveEnCoaching && hasEnCoaching) {
+        await member.roles.remove(enCoachingRole).catch(e => console.error(`Erreur retrait En Coaching à ${member.user.tag}:`, e.message));
+        console.log(`🔻 [Coaching Sync] Rôle "⚡・En Coaching" retiré à ${member.user.tag} (in_coaching = false sur le site)`);
+      }
+
+      // Garantir que le rôle permanent "🎓・Élève Poulpy" est bien présent et ne disparaît jamais
+      if (eleveRole && (shouldHaveEnCoaching || eleveMemberIds.has(member.id)) && !member.roles.cache.has(eleveRole.id)) {
+        await member.roles.add(eleveRole).catch(e => console.error(`Erreur ajout Élève Poulpy à ${member.user.tag}:`, e.message));
+        console.log(`✅ [Coaching Sync] Rôle "🎓・Élève Poulpy" garanti pour ${member.user.tag}`);
+      }
     }
   } catch (err) {
     console.error('Erreur syncAllCoachingRoles:', err.message);
+  } finally {
+    isSyncingRoles = false;
+    if (pendingSyncRoles) {
+      pendingSyncRoles = false;
+      syncAllCoachingRoles(guild, true).catch(() => {});
+    }
   }
+}
+
+async function syncUserCoachingRole(guild, userId, inCoaching) {
+  profileCoachingCache.set(userId, Boolean(inCoaching));
+  await syncAllCoachingRoles(guild, true);
 }
 
 function listenToSupabaseCoachingStatus() {
   console.log('📡 Écoute en temps réel du statut "in_coaching" sur profiles...');
 
-  // Écoute Realtime sur la table profiles
+  // Synchronisation initiale immédiate au démarrage du bot
+  for (const guild of client.guilds.cache.values()) {
+    syncAllCoachingRoles(guild, true).catch(e => console.error('Initial sync error:', e.message));
+  }
+
+  // Écoute Realtime sur la table profiles (INSERT & UPDATE)
+  // Note: sur Supabase Realtime, payload.old ne contient pas in_coaching par défaut,
+  // donc on compare avec profileCoachingCache et on synchronise systématiquement payload.new.in_coaching !
   supabase
     .channel('discord_bot_profiles_in_coaching')
     .on(
       'postgres_changes',
-      { event: 'UPDATE', schema: 'public', table: 'profiles' },
+      { event: '*', schema: 'public', table: 'profiles' },
       async (payload) => {
-        const oldVal = Boolean(payload.old?.in_coaching);
-        const newVal = Boolean(payload.new?.in_coaching);
+        if (!payload.new || !payload.new.id) return;
+        const userId = payload.new.id;
+        const newVal = Boolean(payload.new.in_coaching);
+        const prevVal = profileCoachingCache.get(userId);
 
-        if (oldVal !== newVal) {
-          console.log(`⚡ [Realtime] Statut coaching modifié pour user ${payload.new.id} : in_coaching = ${newVal}`);
+        if (prevVal === undefined || prevVal !== newVal) {
+          console.log(`⚡ [Realtime] Statut coaching modifié pour user ${userId} : ${prevVal} -> ${newVal}`);
+          profileCoachingCache.set(userId, newVal);
           for (const guild of client.guilds.cache.values()) {
-            await syncUserCoachingRole(guild, payload.new.id, newVal);
+            await syncUserCoachingRole(guild, userId, newVal);
           }
         }
       }
     )
     .subscribe();
 
-  // Polling de sécurité toutes les 45 secondes pour synchronisation infaillible
+  // Polling de sécurité toutes les 60 secondes (1 seul appel groupé REST + Supabase, zéro rate-limit)
   setInterval(async () => {
     for (const guild of client.guilds.cache.values()) {
-      await syncAllCoachingRoles(guild);
+      await syncAllCoachingRoles(guild, true);
     }
-  }, 45 * 1000);
+  }, 60 * 1000);
 }
 
 // 5. Supabase Realtime & Polling Listener (Alertes de réservations fiables à 100%)
 let lastKnownBookingId = null;
 
+async function seedBookingStateCache() {
+  try {
+    const { data: recentBookings } = await supabase
+      .from('coaching_bookings')
+      .select('id, status, booking_date, booking_time')
+      .order('created_at', { ascending: false })
+      .limit(100);
+
+    if (recentBookings && recentBookings.length > 0) {
+      lastKnownBookingId = recentBookings[0].id;
+      for (const b of recentBookings) {
+        bookingStateCache.set(b.id, {
+          status: b.status,
+          booking_date: b.booking_date,
+          booking_time: b.booking_time,
+        });
+      }
+    }
+  } catch (e) {
+    console.error('Erreur seedBookingStateCache:', e.message);
+  }
+}
+
 function listenToSupabaseBookings() {
   console.log('📡 Écoute des réservations Supabase sur la table coaching_bookings...');
+  seedBookingStateCache();
 
   // A. Supabase Realtime WebSocket (INSERT & UPDATE)
   supabase
@@ -426,8 +620,15 @@ function listenToSupabaseBookings() {
       { event: 'INSERT', schema: 'public', table: 'coaching_bookings' },
       async (payload) => {
         const booking = payload.new;
-        console.log('🚨 [Realtime] Nouvelle réservation reçue via Supabase :', booking);
+        if (!booking?.id) return;
+        if (bookingStateCache.has(booking.id)) return; // Déjà traité
+        bookingStateCache.set(booking.id, {
+          status: booking.status,
+          booking_date: booking.booking_date,
+          booking_time: booking.booking_time,
+        });
         lastKnownBookingId = booking.id;
+        console.log('🚨 [Realtime] Nouvelle réservation reçue via Supabase :', booking.id);
         await broadcastBookingAlert(booking);
       }
     )
@@ -435,15 +636,44 @@ function listenToSupabaseBookings() {
       'postgres_changes',
       { event: 'UPDATE', schema: 'public', table: 'coaching_bookings' },
       async (payload) => {
-        const oldBooking = payload.old;
+        const oldBooking = payload.old || {};
         const newBooking = payload.new;
-        console.log('🔄 [Realtime] Réservation mise à jour :', newBooking);
-        await broadcastBookingUpdate(oldBooking, newBooking);
+        if (!newBooking?.id) return;
+
+        const prev = bookingStateCache.get(newBooking.id) || {
+          status: oldBooking.status,
+          booking_date: oldBooking.booking_date,
+          booking_time: oldBooking.booking_time,
+        };
+
+        bookingStateCache.set(newBooking.id, {
+          status: newBooking.status,
+          booking_date: newBooking.booking_date,
+          booking_time: newBooking.booking_time,
+        });
+
+        const isNowCancelled = newBooking.status === 'cancelled' || newBooking.status === 'annulé';
+        const wasCancelled = prev.status === 'cancelled' || prev.status === 'annulé';
+        const justCancelled = isNowCancelled && !wasCancelled;
+
+        const dateChanged = Boolean(
+          (prev.booking_date && prev.booking_date !== newBooking.booking_date) ||
+          (prev.booking_time && prev.booking_time !== newBooking.booking_time)
+        );
+        const justRescheduled = !isNowCancelled && newBooking.status !== 'completed' && dateChanged;
+
+        // Ignorer les mises à jour purement techniques (notion_page_id, reminder_2h_sent, read_by_admin, auto-complete)
+        if (!justCancelled && !justRescheduled) {
+          return;
+        }
+
+        console.log(`🔄 [Realtime] Réservation ${justCancelled ? 'annulée' : 'déplacée'} (${newBooking.id})`);
+        await broadcastBookingUpdate(prev, newBooking);
       }
     )
     .subscribe();
 
-  // B. Fallback Polling (Vérifie toutes les 15 secondes pour garantir 0 réservation manquée)
+  // B. Fallback Polling (Vérifie toutes les 20 secondes pour garantir 0 réservation manquée)
   setInterval(async () => {
     try {
       const { data: latestBookings, error } = await supabase
@@ -456,16 +686,26 @@ function listenToSupabaseBookings() {
         const latest = latestBookings[0];
         if (lastKnownBookingId === null) {
           lastKnownBookingId = latest.id;
-        } else if (lastKnownBookingId !== latest.id) {
-          console.log('🚨 [Polling Detection] Nouvelle réservation détectée :', latest);
+          bookingStateCache.set(latest.id, {
+            status: latest.status,
+            booking_date: latest.booking_date,
+            booking_time: latest.booking_time,
+          });
+        } else if (lastKnownBookingId !== latest.id && !bookingStateCache.has(latest.id)) {
+          console.log('🚨 [Polling Detection] Nouvelle réservation détectée :', latest.id);
           lastKnownBookingId = latest.id;
+          bookingStateCache.set(latest.id, {
+            status: latest.status,
+            booking_date: latest.booking_date,
+            booking_time: latest.booking_time,
+          });
           await broadcastBookingAlert(latest);
         }
       }
     } catch (e) {
       console.error('Erreur polling bookings:', e.message);
     }
-  }, 15000); // 15 secondes
+  }, 20000);
 }
 
 // Gestion des mises à jour / déplacements / annulations
@@ -479,24 +719,28 @@ async function broadcastBookingUpdate(oldBooking, newBooking) {
   const status = newBooking.status;
 
   const isCancelled = status === 'cancelled' || status === 'annulé';
-  const isRescheduled = oldBooking && (oldBooking.booking_date !== newBooking.booking_date || oldBooking.booking_time !== newBooking.booking_time);
+  const isRescheduled = Boolean(
+    oldBooking &&
+    oldBooking.booking_date &&
+    (oldBooking.booking_date !== newBooking.booking_date || oldBooking.booking_time !== newBooking.booking_time)
+  );
 
   // 1. Embed pour le Coach dans #alertes-réservations
   const embed = new EmbedBuilder()
-    .setTitle(isCancelled ? '🔴 RÉSERVATION ANNULÉE !' : '🟡 RÉSERVATION MODIFIÉE / DÉPLACÉE !')
+    .setTitle(isCancelled ? '🔴 RÉSERVATION ANNULÉE !' : '🟡 RÉSERVATION DÉPLACÉE !')
     .setColor(isCancelled ? 0xef4444 : 0xeab308)
-    .setThumbnail(`${SITE_URL}/logo.png`)
+    .setThumbnail(LOGO_URL)
     .addFields(
       { name: '👤 Élève', value: `**${studentName}** (\`${studentDiscord}\`)`, inline: true },
       { name: '🎮 Jeu & Formule', value: `${game} • ${plan}`, inline: true },
       { name: '📅 Date & Heure', value: `**${date}** à **${time}**`, inline: true },
-      { name: '📊 Nouveau Statut', value: `**${status || 'Mis à jour'}**`, inline: true }
+      { name: '📊 Nouveau Statut', value: `**${isCancelled ? 'Annulée' : 'Reportée'}**`, inline: true }
     )
-    .setFooter({ text: 'Poulpy Coaching System' })
+    .setFooter({ text: 'Poulpy Coaching System • www.poulpy-coaching.fr' })
     .setTimestamp();
 
-  if (isRescheduled && oldBooking) {
-    embed.addFields({ name: '⏱️ Ancien créneau', value: `${oldBooking.booking_date || ''} à ${oldBooking.booking_time || ''}` });
+  if (isRescheduled && oldBooking?.booking_date) {
+    embed.addFields({ name: '⏱️ Ancien créneau', value: `${oldBooking.booking_date} à ${oldBooking.booking_time || ''}` });
   }
 
   const row = new ActionRowBuilder().addComponents(
@@ -525,40 +769,31 @@ async function broadcastBookingUpdate(oldBooking, newBooking) {
     }
 
     // 2. Notification en MP à l'élève
-    const cleanHandle = studentDiscord.replace(/^@/, '').trim().toLowerCase();
-    if (cleanHandle) {
-      try {
-        const members = await guild.members.fetch();
-        const studentMember = members.find(m =>
-          m.user.username.toLowerCase() === cleanHandle ||
-          m.user.tag.toLowerCase() === cleanHandle ||
-          m.displayName.toLowerCase() === cleanHandle ||
-          m.id === cleanHandle
+    try {
+      const studentMember = await findDiscordMemberForUser(guild, newBooking.user_id, studentDiscord);
+      if (studentMember) {
+        const studentEmbed = new EmbedBuilder()
+          .setTitle(isCancelled ? '🔴 ANNULATION DE TA SÉANCE • POULPY COACHING' : '🟡 NOUVEL HORAIRE DE SÉANCE • POULPY COACHING')
+          .setColor(isCancelled ? 0xef4444 : 0xeab308)
+          .setThumbnail(LOGO_URL)
+          .setDescription(
+            isCancelled
+              ? `Bonjour **${studentName}**,\n\nTa séance de coaching prévue le **${date} à ${time}** a été **annulée**.\nPour reprendre un créneau : [Accéder au site](${SITE_URL}/#booking)`
+              : `Bonjour **${studentName}** ! 🎉\n\nTa séance de coaching a été reprogrammée :\n\n📅 **Nouveau créneau : ${date} à ${time}**\n🎮 **Jeu : ${game}**\n\nÀ très vite sur le vocal !`
+          )
+          .setTimestamp();
+
+        const studentRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel('📊 Mon Espace de Suivi')
+            .setURL(`${SITE_URL}/profile/coaching`)
+            .setStyle(ButtonStyle.Link)
         );
 
-        if (studentMember) {
-          const studentEmbed = new EmbedBuilder()
-            .setTitle(isCancelled ? '🔴 ANNULATION DE TA SÉANCE • POULPY COACHING' : '🟡 MODIFICATION DE TON COACHING • POULPY COACHING')
-            .setColor(isCancelled ? 0xef4444 : 0xeab308)
-            .setDescription(
-              isCancelled
-                ? `Bonjour **${studentName}**,\n\nTa séance de coaching prévue le **${date} à ${time}** a bien été **annulée**.\nPour reprendre un créneau : [Accéder au site](${SITE_URL}/#booking)`
-                : `Bonjour **${studentName}** ! 🎉\n\nTa séance de coaching a été mise à jour :\n\n📅 **Nouveau créneau : ${date} à ${time}**\n🎮 **Jeu : ${game}**\n\nÀ très vite sur le vocal !`
-            )
-            .setTimestamp();
-
-          const studentRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setLabel('📊 Mon Espace de Suivi')
-              .setURL(`${SITE_URL}/profile/coaching`)
-              .setStyle(ButtonStyle.Link)
-          );
-
-          await studentMember.send({ embeds: [studentEmbed], components: [studentRow] }).catch(() => {});
-        }
-      } catch (e) {
-        console.error('Erreur MP student update:', e.message);
+        await studentMember.send({ embeds: [studentEmbed], components: [studentRow] }).catch(() => {});
       }
+    } catch (e) {
+      console.error('Erreur MP student update:', e.message);
     }
   }
 }
@@ -577,7 +812,7 @@ async function broadcastBookingAlert(booking) {
   const embed = new EmbedBuilder()
     .setTitle('🚨 NOUVELLE RÉSERVATION DE COACHING !')
     .setColor(0x06b6d4) // Cyan Poulpy
-    .setThumbnail(`${SITE_URL}/logo.png`)
+    .setThumbnail(LOGO_URL)
     .addFields(
       { name: '👤 Élève / Nom', value: `**${studentName}**`, inline: true },
       { name: '💬 Discord', value: `\`${studentDiscord}\``, inline: true },
@@ -588,7 +823,7 @@ async function broadcastBookingAlert(booking) {
       { name: '💶 Prix / Statut', value: `${price} • **${booking.status || 'Confirmé'}**`, inline: true },
       { name: '🎯 Objectifs de l\'élève', value: notes }
     )
-    .setFooter({ text: 'Poulpy Coaching System • poulpy-coaching.vercel.app' })
+    .setFooter({ text: 'Poulpy Coaching System • www.poulpy-coaching.fr' })
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
@@ -621,66 +856,55 @@ async function broadcastBookingAlert(booking) {
       }
     }
 
-    // 2. Recherche et notification en Message Privé (MP) de l'élève + Attribution du rôle Élève
-    const cleanHandle = studentDiscord.replace(/^@/, '').trim().toLowerCase();
-    if (cleanHandle && cleanHandle !== 'non renseigné') {
-      try {
-        const members = await guild.members.fetch();
-        const studentMember = members.find(m =>
-          m.user.username.toLowerCase() === cleanHandle ||
-          m.user.tag.toLowerCase() === cleanHandle ||
-          m.displayName.toLowerCase() === cleanHandle ||
-          m.id === cleanHandle
+    // 2. Recherche et notification en Message Privé (MP) de l'élève + Attribution des rôles
+    try {
+      const studentMember = await findDiscordMemberForUser(guild, booking.user_id, studentDiscord);
+      if (studentMember) {
+        console.log(`👤 Élève trouvé sur Discord : ${studentMember.user.tag} (Serveur : ${guild.name})`);
+
+        const { enCoachingRole, eleveRole } = await ensureCoachingRoles(guild);
+        if (eleveRole && !studentMember.roles.cache.has(eleveRole.id)) {
+          await studentMember.roles.add(eleveRole).catch(e => console.log('Erreur ajout rôle élève:', e.message));
+        }
+        if (enCoachingRole && !studentMember.roles.cache.has(enCoachingRole.id)) {
+          await studentMember.roles.add(enCoachingRole).catch(e => console.log('Erreur ajout rôle En Coaching:', e.message));
+        }
+
+        const studentEmbed = new EmbedBuilder()
+          .setTitle('🐙 CONFIRMATION DE TA RÉSERVATION • POULPY COACHING')
+          .setColor(0x06b6d4)
+          .setThumbnail(LOGO_URL)
+          .setDescription(
+            `Salut **${studentName}** ! 🎉\n\n` +
+            `Ta réservation pour une séance de coaching sur **${game}** a bien été enregistrée et confirmée avec **Poulpy**.`
+          )
+          .addFields(
+            { name: '📦 Formule', value: `**${plan}** (${price})`, inline: true },
+            { name: '📅 Date & Heure', value: `**${date}** à **${time}**`, inline: true },
+            { name: '🎙️ Où se déroule le coaching ?', value: 'Sur le serveur Discord dans le salon vocal **`🎙️ Coaching 1-on-1`** (tu as désormais accès aux salons privés élèves).' },
+            { name: '📝 Comment bien te préparer ?', value: '• Connecte-toi sur Discord 5 minutes avant l\'heure prévue.\n• Si tu as des VODs ou des questions, tu peux utiliser la commande `/vod` sur le serveur ou les partager dans le salon `#📁・partage-vod`.' }
+          )
+          .setFooter({ text: 'Poulpy Coaching • À très vite en session !' })
+          .setTimestamp();
+
+        const studentRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel('📊 Mon Espace de Suivi')
+            .setURL(`${SITE_URL}/profile/coaching`)
+            .setStyle(ButtonStyle.Link),
+          new ButtonBuilder()
+            .setLabel('🌐 Site Web')
+            .setURL(SITE_URL)
+            .setStyle(ButtonStyle.Link)
         );
 
-        if (studentMember) {
-          console.log(`👤 Élève trouvé sur Discord : ${studentMember.user.tag} (Serveur : ${guild.name})`);
-
-          // Attribution automatique du rôle Élève Poulpy et du rôle En Coaching
-          const { enCoachingRole, eleveRole } = await ensureCoachingRoles(guild);
-          if (eleveRole && !studentMember.roles.cache.has(eleveRole.id)) {
-            await studentMember.roles.add(eleveRole).catch(e => console.log('Erreur ajout rôle élève:', e.message));
-          }
-          if (enCoachingRole && !studentMember.roles.cache.has(enCoachingRole.id)) {
-            await studentMember.roles.add(enCoachingRole).catch(e => console.log('Erreur ajout rôle En Coaching:', e.message));
-          }
-
-          // Message Privé de Confirmation
-          const studentEmbed = new EmbedBuilder()
-            .setTitle('🐙 CONFIRMATION DE TA RÉSERVATION • POULPY COACHING')
-            .setColor(0x06b6d4)
-            .setDescription(
-              `Salut **${studentName}** ! 🎉\n\n` +
-              `Ta réservation pour une séance de coaching sur **${game}** a bien été enregistrée et confirmée avec **Poulpy**.`
-            )
-            .addFields(
-              { name: '📦 Formule', value: `**${plan}** (${price})`, inline: true },
-              { name: '📅 Date & Heure', value: `**${date}** à **${time}**`, inline: true },
-              { name: '🎙️ Où se déroule le coaching ?', value: 'Sur le serveur Discord dans le salon vocal **`🎙️ Coaching 1-on-1`** (tu as désormais accès aux salons privés élèves).' },
-              { name: '📝 Comment bien te préparer ?', value: '• Connecte-toi sur Discord 5 minutes avant l\'heure prévue.\n• Si tu as des VODs ou des questions, tu peux utiliser la commande `/vod` sur le serveur ou les partager dans le salon `#📁・partage-vod`.' }
-            )
-            .setFooter({ text: 'Poulpy Coaching • À très vite en session !' })
-            .setTimestamp();
-
-          const studentRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setLabel('📊 Mon Espace de Suivi')
-              .setURL(`${SITE_URL}/profile/coaching`)
-              .setStyle(ButtonStyle.Link),
-            new ButtonBuilder()
-              .setLabel('🌐 Site Web')
-              .setURL(SITE_URL)
-              .setStyle(ButtonStyle.Link)
-          );
-
-          await studentMember.send({ embeds: [studentEmbed], components: [studentRow] }).catch(err => {
-            console.warn(`Impossible d'envoyer le MP à ${studentMember.user.tag} (DMs fermés) :`, err.message);
-          });
-          console.log(`✉️ MP de confirmation envoyé à l'élève : ${studentMember.user.tag}`);
-        }
-      } catch (err) {
-        console.error('Erreur recherche membre élève pour MP:', err.message);
+        await studentMember.send({ embeds: [studentEmbed], components: [studentRow] }).catch(err => {
+          console.warn(`Impossible d'envoyer le MP à ${studentMember.user.tag} (DMs fermés) :`, err.message);
+        });
+        console.log(`✉️ MP de confirmation envoyé à l'élève : ${studentMember.user.tag}`);
       }
+    } catch (err) {
+      console.error('Erreur recherche membre élève pour MP:', err.message);
     }
   }
 }
@@ -996,7 +1220,7 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle(`📢 ${titre}`)
         .setColor(0x06b6d4)
         .setDescription(message)
-        .setThumbnail(`${SITE_URL}/logo.png`)
+        .setThumbnail(LOGO_URL)
         .setFooter({ text: 'Poulpy Coaching • Annonce Officielle' })
         .setTimestamp();
 
@@ -1337,6 +1561,7 @@ async function postRoleSelector(channel) {
 async function applyServerPermissions(guild) {
   const roles = await guild.roles.fetch();
   const coachRole = roles.find(r => r.name === '👑・Coach Poulpy');
+  const enCoachingRole = roles.find(r => r.name === '⚡・En Coaching' || r.name === 'En Coaching');
   const eleveRole = roles.find(r => r.name === '🎓・Élève Poulpy');
   const membreRole = roles.find(r => r.name === '⭐・Membre Vérifié');
   const apexRole = roles.find(r => r.name === '🔴・Apex Legends');
@@ -1463,12 +1688,21 @@ async function applyServerPermissions(guild) {
       }
     }
 
-    // 5. Zone Coaching (Élèves & Coach uniquement)
+    // 5. Zone Coaching (Élèves, En Coaching & Coach uniquement)
     if (['📁・partage-vod', '📝・debrief-et-suivi', '🎙️ Coaching 1-on-1', '⏳ Salle d\'attente'].includes(channel.name)) {
       await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }).catch(() => {});
       if (membreRole) await channel.permissionOverwrites.edit(membreRole, { ViewChannel: false }).catch(() => {});
       if (eleveRole) {
         await channel.permissionOverwrites.edit(eleveRole, {
+          ViewChannel: true,
+          SendMessages: true,
+          Connect: true,
+          Speak: true,
+          AttachFiles: true
+        }).catch(() => {});
+      }
+      if (enCoachingRole) {
+        await channel.permissionOverwrites.edit(enCoachingRole, {
           ViewChannel: true,
           SendMessages: true,
           Connect: true,
@@ -1492,6 +1726,7 @@ async function applyServerPermissions(guild) {
       await channel.permissionOverwrites.edit(everyone, { ViewChannel: false }).catch(() => {});
       if (membreRole) await channel.permissionOverwrites.edit(membreRole, { ViewChannel: false }).catch(() => {});
       if (eleveRole) await channel.permissionOverwrites.edit(eleveRole, { ViewChannel: false }).catch(() => {});
+      if (enCoachingRole) await channel.permissionOverwrites.edit(enCoachingRole, { ViewChannel: false }).catch(() => {});
       if (coachRole) {
         await channel.permissionOverwrites.edit(coachRole, {
           ViewChannel: true,
@@ -1587,39 +1822,39 @@ client.on('guildMemberAdd', async (member) => {
     }
   }
 
-  // 9. Vérification si le nouveau membre a déjà réservé un cours sur le site
+  // 9. Synchroniser immédiatement les rôles coaching / élève et envoyer un MP si une séance à venir existe
   try {
+    await syncAllCoachingRoles(member.guild, true);
+
     const cleanUsername = member.user.username.toLowerCase();
     const cleanTag = member.user.tag.toLowerCase();
+    const todayStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Paris',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
 
     const { data: existingBookings, error } = await supabase
       .from('coaching_bookings')
       .select('*')
-      .eq('status', 'confirmed')
+      .in('status', ['confirmed', 'rescheduled'])
+      .gte('booking_date', todayStr)
       .order('created_at', { ascending: false });
 
     if (!error && existingBookings) {
       const match = existingBookings.find(b => {
-        const d = (b.student_discord || '').replace(/^@/, '').trim().toLowerCase();
-        return d && (d === cleanUsername || d === cleanTag || cleanUsername.includes(d) || d.includes(cleanUsername));
+        const d = normalizeHandle(b.student_discord);
+        return d && (d === cleanUsername || d === cleanTag || d.split('#')[0] === cleanUsername);
       });
 
       if (match) {
-        console.log(`🎓 Nouveau membre avec réservation existante détecté : ${member.user.tag}`);
+        console.log(`🎓 Nouveau membre avec réservation à venir détecté : ${member.user.tag}`);
 
-        // Attribuer le rôle Élève + rôle En Coaching
-        const { enCoachingRole, eleveRole } = await ensureCoachingRoles(member.guild);
-        if (eleveRole && !member.roles.cache.has(eleveRole.id)) {
-          await member.roles.add(eleveRole).catch(console.error);
-        }
-        if (enCoachingRole && !member.roles.cache.has(enCoachingRole.id)) {
-          await member.roles.add(enCoachingRole).catch(console.error);
-        }
-
-        // Envoyer le MP de récapitulatif
         const recapEmbed = new EmbedBuilder()
           .setTitle('🐙 BIENVENUE SUR LE DISCORD • TON COACHING EST CONFIRMÉ')
           .setColor(0x06b6d4)
+          .setThumbnail(LOGO_URL)
           .setDescription(
             `Salut **${match.student_name || member.user.username}** ! 🎉\n\n` +
             `Tu avais déjà réservé une séance de coaching sur **${match.game || 'Valorant'}** avant de rejoindre le serveur.`
@@ -1627,7 +1862,7 @@ client.on('guildMemberAdd', async (member) => {
           .addFields(
             { name: '📦 Formule', value: `**${match.plan_name || 'Coaching'}**`, inline: true },
             { name: '📅 Date & Heure', value: `**${match.booking_date || ''}** à **${match.booking_time || ''}**`, inline: true },
-            { name: '🎙️ Où se déroule le coaching ?', value: 'Dans le salon vocal **`🎙️ Coaching 1-on-1`** (le rôle Élève t\'a été attribué automatiquement).' }
+            { name: '🎙️ Où se déroule le coaching ?', value: 'Dans le salon vocal **`🎙️ Coaching 1-on-1`** (tes rôles Élève & En Coaching t\'ont été attribués automatiquement).' }
           )
           .setFooter({ text: 'Poulpy Coaching • À très vite en session !' })
           .setTimestamp();
