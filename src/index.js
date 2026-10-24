@@ -2083,7 +2083,8 @@ client.on('guildMemberAdd', async (member) => {
           .setTitle('👋 BIENVENUE SUR POULPY COACHING !')
           .setDescription(
             `Salut **${member.user.username}** et bienvenue dans la communauté ! 🎉\n\n` +
-            `### 🚀 Pour bien démarrer sur le serveur :\n\n\n` +
+            `### Pour bien démarrer sur le serveur :\n` +
+            `_ _\n` +
             `**🎯 Choisis tes jeux :**\n` +
             `Rends-toi dans le salon ${rolesMention} pour débloquer les canaux et trouver des mates avec qui grind.\n\n` +
             `**📦 Prendre un coaching :**\n` +
