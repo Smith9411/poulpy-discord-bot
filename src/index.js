@@ -2073,23 +2073,19 @@ client.on('guildMemberAdd', async (member) => {
         const rolesMention = rolesChannel ? `<#${rolesChannel.id}>` : '#🎯・choisir-ses-jeux';
 
         const welcomeDmEmbed = new EmbedBuilder()
+          .setTitle('🐙 BIENVENUE SUR POULPY COACHING !')
           .setColor(0x06b6d4)
           .setThumbnail(LOGO_URL)
-          .setAuthor({
-            name: 'POULPY COACHING • E-SPORT ACADEMY',
-            iconURL: LOGO_URL,
-            url: SITE_URL,
-          })
-          .setTitle(`👋 Bienvenue dans l'équipage, ${member.user.username} !`)
           .setDescription(
-            `> *Ici, on s'entraîne, on analyse tes erreurs et on débloque ton plein potentiel sur **Apex Legends** & **Valorant** avec Coach Poulpy.*\n\n` +
-            `### 🚀 Comment bien démarrer ?\n\n` +
-            `**1️⃣・Débloque tes salons de jeux**\n` +
-            `Fais un tour dans ${rolesMention} pour afficher les canaux et trouver des coéquipiers avec qui grind.\n\n` +
-            `**2️⃣・Booste ton niveau en coaching**\n` +
-            `Séance Solo, Pack Suivi ou Analyse VOD : réserve ton créneau personnalisé directement sur le site officiel.\n\n` +
-            `**3️⃣・Fais analyser tes games**\n` +
-            `Utilise la commande \`/vod\` n'importe quand sur le serveur pour soumettre un replay.`
+            `Salut **${member.user.username}** et bienvenue dans la communauté ! 🎉\n\n` +
+            `### 🚀 Pour bien démarrer sur le serveur :\n\n` +
+            `**🎯 Choisis tes jeux :**\n` +
+            `Rends-toi dans le salon ${rolesMention} pour débloquer les canaux et trouver des mates avec qui grind.\n\n` +
+            `**📦 Prendre un coaching :**\n` +
+            `Envie de débloquer ton plein potentiel avec une analyse personnalisée en direct ?\n` +
+            `Découvre les formules (Séance Solo, Pack Suivi, Analyse VOD) directement sur notre site officiel.\n\n` +
+            `**📹 Faire analyser une VOD :**\n` +
+            `Tu peux soumettre tes replays à tout moment avec la commande \`/vod\` sur le serveur.`
           )
           .setFooter({
             text: 'Poulpy Coaching • Atheris Esport • www.poulpy-coaching.fr',
