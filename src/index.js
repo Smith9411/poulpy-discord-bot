@@ -2063,6 +2063,46 @@ client.on('guildMemberAdd', async (member) => {
         );
 
         await member.send({ embeds: [recapEmbed], components: [row] }).catch(() => {});
+      } else {
+        // Envoi du MP de bienvenue officiel Poulpy Coaching pour les nouveaux arrivants
+        const rolesChannel = member.guild.channels.cache.find(c => c.name.includes('choisir-ses-jeux'));
+        const rolesChannelUrl = rolesChannel
+          ? `https://discord.com/channels/${member.guild.id}/${rolesChannel.id}`
+          : `https://discord.com/channels/${member.guild.id}`;
+
+        const welcomeDmEmbed = new EmbedBuilder()
+          .setTitle('🐙 BIENVENUE SUR POULPY COACHING !')
+          .setColor(0x06b6d4)
+          .setThumbnail(LOGO_URL)
+          .setDescription(
+            `Salut **${member.user.username}** et bienvenue dans la communauté ! 🎉\n\n` +
+            `🚀 **Pour bien démarrer sur le serveur :**\n\n` +
+            `🎯 **Choisis tes jeux :**\n` +
+            `Rends-toi dans le salon **[#🎯・choisir-ses-jeux](${rolesChannelUrl})** pour débloquer les canaux et trouver des mates avec qui grind.\n\n` +
+            `📦 **Prendre un coaching :**\n` +
+            `Envie de débloquer ton plein potentiel avec une analyse personnalisée en direct ?\n` +
+            `Découvre les formules (Séance Solo, Pack Suivi, Analyse VOD) directement sur notre site officiel.\n\n` +
+            `📹 **Faire analyser une VOD :**\n` +
+            `Tu peux soumettre tes replays à tout moment avec la commande \`/vod\` sur le serveur.`
+          )
+          .setFooter({ text: 'Poulpy Coaching • Atheris Esport • www.poulpy-coaching.fr' })
+          .setTimestamp();
+
+        const welcomeRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel('🌐 Découvrir le site web')
+            .setURL(SITE_URL)
+            .setStyle(ButtonStyle.Link),
+          new ButtonBuilder()
+            .setLabel('🎯 Choisir mes jeux sur Discord')
+            .setURL(rolesChannelUrl)
+            .setStyle(ButtonStyle.Link)
+        );
+
+        await member.send({ embeds: [welcomeDmEmbed], components: [welcomeRow] }).catch((err) => {
+          console.warn(`Impossible d'envoyer le MP de bienvenue à ${member.user.tag} (DMs fermés) :`, err.message);
+        });
+        console.log(`✉️ MP de bienvenue envoyé avec succès à ${member.user.tag}`);
       }
     }
   } catch (err) {
