@@ -235,6 +235,7 @@ client.once('ready', async () => {
   await registerCommands();
   listenToSupabaseBookings();
   listenToSupabaseCoachingStatus();
+  startSessionReminderLoop();
 });
 
 // --- SYSTÈME DE RÔLE DYNAMIQUE "⚡・EN COACHING" ---
@@ -989,6 +990,111 @@ async function broadcastBookingAlert(booking) {
       console.error('Erreur recherche membre élève pour MP:', err.message);
     }
   }
+}
+
+// 5.bis Rappel automatique de coaching en MP Discord (H-15 min)
+function startSessionReminderLoop() {
+  console.log('⏰ Démarrage de la boucle de rappel de séance Discord (H-15 min)...');
+
+  const checkReminders = async () => {
+    try {
+      const now = new Date();
+      const parisDate = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Paris',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(now);
+
+      const parisTime = new Intl.DateTimeFormat('fr-FR', {
+        timeZone: 'Europe/Paris',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(now);
+
+      const [currentH, currentM] = parisTime.split(':').map(Number);
+      const nowMinutes = currentH * 60 + currentM;
+
+      const { data: bookings, error } = await supabase
+        .from('coaching_bookings')
+        .select('*')
+        .eq('booking_date', parisDate)
+        .in('status', ['confirmed', 'rescheduled']);
+
+      if (error || !bookings || bookings.length === 0) return;
+
+      for (const booking of bookings) {
+        const notes = typeof booking.admin_notes === 'string' ? booking.admin_notes : '';
+        if (notes.includes('[discord_reminder_15m_sent]')) continue;
+
+        const [bookH, bookM] = (booking.booking_time || '').split(':').map(Number);
+        if (isNaN(bookH) || isNaN(bookM)) continue;
+
+        const sessionMinutes = bookH * 60 + bookM;
+        const diffMinutes = sessionMinutes - nowMinutes;
+
+        // Fenêtre d'envoi : entre 0 et 15 minutes avant le début de la séance
+        if (diffMinutes <= 15 && diffMinutes >= 0) {
+          const studentName = booking.student_name || 'Élève';
+          const studentDiscord = booking.student_discord || '';
+          const game = booking.game || 'Valorant';
+          const plan = booking.plan_name || 'Coaching';
+          const time = booking.booking_time;
+
+          for (const guild of client.guilds.cache.values()) {
+            const member = await findDiscordMemberForUser(guild, booking.user_id, studentDiscord);
+            if (member) {
+              const reminderEmbed = new EmbedBuilder()
+                .setTitle('⏰ TA SÉANCE COMMENCE DANS 15 MINUTES !')
+                .setColor(0x06b6d4)
+                .setThumbnail(LOGO_URL)
+                .setDescription(
+                  `Salut **${studentName}** ! 🐙\n\n` +
+                  `Ta session de coaching sur **${game}** (${plan}) commence à **${time}** pile.\n\n` +
+                  `🎙️ **Rejoins le salon vocal :**\n` +
+                  `Rends-toi dans le salon vocal **\`🎙️ Coaching 1-on-1\`** sur le serveur Discord.\n\n` +
+                  `⚡ **Checklist de préparation :**\n` +
+                  `• Casque & micro branchés\n` +
+                  `• Partage d'écran 60 FPS activé\n` +
+                  `• Jeu lancé et à jour`
+                )
+                .setFooter({ text: 'Poulpy Coaching • À tout de suite sur le vocal !' })
+                .setTimestamp();
+
+              const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                  .setLabel('📊 Mon Espace de Suivi')
+                  .setURL(`${SITE_URL}/profile/coaching`)
+                  .setStyle(ButtonStyle.Link),
+                new ButtonBuilder()
+                  .setLabel('🌐 Site Web')
+                  .setURL(SITE_URL)
+                  .setStyle(ButtonStyle.Link)
+              );
+
+              await member.send({ embeds: [reminderEmbed], components: [row] }).catch((e) => {
+                console.warn(`Impossible d'envoyer le rappel H-15m à ${member.user.tag}:`, e.message);
+              });
+              console.log(`⏰ [Rappel 15m] MP envoyé avec succès à ${member.user.tag} pour la séance de ${time}`);
+            }
+          }
+
+          // Verrou anti-doublon dans Supabase
+          const updatedNotes = `${notes} [discord_reminder_15m_sent]`.trim();
+          await supabase
+            .from('coaching_bookings')
+            .update({ admin_notes: updatedNotes, updated_at: new Date().toISOString() })
+            .eq('id', booking.id);
+        }
+      }
+    } catch (err) {
+      console.error('Erreur boucle rappel 15m:', err.message);
+    }
+  };
+
+  checkReminders();
+  setInterval(checkReminders, 60 * 1000);
 }
 
 // 6. Gestion des Interactions (Commandes & Boutons)
