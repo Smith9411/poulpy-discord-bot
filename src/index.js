@@ -2073,12 +2073,17 @@ client.on('guildMemberAdd', async (member) => {
         const rolesMention = rolesChannel ? `<#${rolesChannel.id}>` : '#🎯・choisir-ses-jeux';
 
         const welcomeDmEmbed = new EmbedBuilder()
-          .setTitle('🐙 BIENVENUE SUR POULPY COACHING !')
           .setColor(0x06b6d4)
           .setThumbnail(LOGO_URL)
+          .setAuthor({
+            name: 'POULPY COACHING • E-SPORT ACADEMY',
+            iconURL: LOGO_URL,
+            url: SITE_URL,
+          })
+          .setTitle('👋 BIENVENUE SUR POULPY COACHING !')
           .setDescription(
             `Salut **${member.user.username}** et bienvenue dans la communauté ! 🎉\n\n` +
-            `### 🚀 Pour bien démarrer sur le serveur :\n\n` +
+            `### 🚀 Pour bien démarrer sur le serveur :\n\n\n` +
             `**🎯 Choisis tes jeux :**\n` +
             `Rends-toi dans le salon ${rolesMention} pour débloquer les canaux et trouver des mates avec qui grind.\n\n` +
             `**📦 Prendre un coaching :**\n` +
