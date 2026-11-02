@@ -277,7 +277,13 @@ function extractUserDiscordCandidates(profile, authUser, userBookings) {
   const handles = new Set();
 
   const addCandidate = (raw) => {
-    const clean = normalizeHandle(raw);
+    if (!raw) return;
+    const rawStr = String(raw);
+    const matchedSnowflakes = rawStr.match(/\b\d{17,20}\b/g);
+    if (matchedSnowflakes) {
+      for (const id of matchedSnowflakes) discordIds.add(id);
+    }
+    const clean = normalizeHandle(rawStr);
     if (!clean || clean === 'non renseigné' || clean === 'test') return;
     if (/^\d{17,20}$/.test(clean)) {
       discordIds.add(clean);
@@ -405,12 +411,16 @@ async function findDiscordMemberForUser(guild, userId, fallbackDiscordHandle = '
     const handles = new Set();
 
     if (fallbackDiscordHandle) {
-      const clean = normalizeHandle(fallbackDiscordHandle);
-      if (clean && clean !== 'non renseigné') {
-        if (/^\d{17,20}$/.test(clean)) discordIds.add(clean);
-        handles.add(clean);
-        if (clean.includes('#')) handles.add(clean.split('#')[0].trim());
+      const rawStr = String(fallbackDiscordHandle);
+      const matchedSnowflakes = rawStr.match(/\b\d{17,20}\b/g);
+      if (matchedSnowflakes) {
+        for (const id of matchedSnowflakes) discordIds.add(id);
       }
+      const clean = normalizeHandle(rawStr);
+      if (!clean || clean === 'non renseigné') return;
+      if (/^\d{17,20}$/.test(clean)) discordIds.add(clean);
+      handles.add(clean);
+      if (clean.includes('#')) handles.add(clean.split('#')[0].trim());
     }
 
     if (userId) {
